@@ -52,6 +52,7 @@ from .notification import NotifyBar
 from .pace_notes_view import PaceNotesControl
 from .preset_view import PresetList
 from .spectate_view import SpectateList
+from .broadcast_view import BroadcastList
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +74,7 @@ class TabView(QWidget):
         module_tab = ModuleList(self, mctrl)
         preset_tab = PresetList(self)
         spectate_tab = SpectateList(self)
+        broadcast_tab = BroadcastList(self)
         pacenotes_tab = PaceNotesControl(self)
         hotkey_tab = HotkeyList(self)
 
@@ -81,8 +83,9 @@ class TabView(QWidget):
         self._tabs.addTab(module_tab, "Module")  # 1
         self._tabs.addTab(preset_tab, "Preset")  # 2
         self._tabs.addTab(spectate_tab, "Spectate")  # 3
-        self._tabs.addTab(pacenotes_tab, "Pacenotes")  # 4
-        self._tabs.addTab(hotkey_tab, "Hotkey")  # 5
+        self._tabs.addTab(broadcast_tab, "Broadcast")  # 4
+        self._tabs.addTab(pacenotes_tab, "Pacenotes")  # 5
+        self._tabs.addTab(hotkey_tab, "Hotkey")  # 6
         self._tabs.currentChanged.connect(self.refresh)
 
         # Main view
@@ -101,6 +104,7 @@ class TabView(QWidget):
         app_signal.refresh.connect(module_tab.refresh)
         app_signal.refresh.connect(preset_tab.refresh)
         app_signal.refresh.connect(spectate_tab.refresh)
+        app_signal.refresh.connect(broadcast_tab.refresh)
         app_signal.refresh.connect(pacenotes_tab.refresh)
         app_signal.refresh.connect(hotkey_tab.refresh)
 
@@ -122,11 +126,11 @@ class TabView(QWidget):
 
     def select_pacenotes_tab(self):
         """Select pace notes tab"""
-        self._tabs.setCurrentIndex(4)
+        self._tabs.setCurrentIndex(5)
 
     def select_hotkey_tab(self):
         """Select hotkey tab"""
-        self._tabs.setCurrentIndex(5)
+        self._tabs.setCurrentIndex(6)
 
 
 class StatusButtonBar(QStatusBar):
