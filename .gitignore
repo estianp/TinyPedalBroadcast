@@ -3,6 +3,7 @@
 /brandlogo/
 /deltabest/
 /dist/
+!/dist/run.exe
 /dist/TinyPedal/
 /settings/
 /trackmap/
