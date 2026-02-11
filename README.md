@@ -102,6 +102,31 @@ Note, if game cannot generate `rFactor2SharedMemoryMapPlugin64.dll` entry in `Cu
 
 6. To quit APP, `Right Click` on tray icon and select `Quit`; or, click `Overlay` menu from main window and select `Quit`.
 
+## Spectate Mode
+
+TinyPedal includes a built-in spectate panel for monitoring and switching between drivers during a session.
+
+### Features
+
+- **Driver List** — View all drivers with position in class, class name, and status tags.
+- **Focus Camera** — Switch the in-game camera to the selected driver (LMU, requires REST API enabled).
+- **Live Timing** — View real-time lap times, sector splits, best sectors, and gap data for the spectated driver.
+- **Battle Detection** — Drivers within 1 second of a same-class car are highlighted red `[BATTLE]`, within 2 seconds orange.
+- **Status Tags** — `[PIT]`, `[YELLOW]`, `[BLUE]` tags indicate driver status. Yellow and blue flagged drivers are excluded from battle detection.
+- **Sticky Yellow Flag** — Yellow flag highlights persist for 5 seconds after a driver resumes speed, making it easier to track incidents.
+- **Sort Modes** — Toggle between Standings (position order) and Relative (gap to spectated driver) views.
+- **Hotkeys** — Spectate next/previous driver via configurable keyboard shortcuts.
+
+### Usage
+
+1. Open the main window and navigate to the **Spectate** tab.
+2. Click **Enabled** to activate spectate mode.
+3. Select a driver from the list and click **Spectate** or double-click to switch.
+4. Click **Focus Camera** to move the in-game camera to the selected driver.
+
+> [!NOTE]
+> Focus Camera requires the game's REST API to be enabled. In LMU, ensure `Enable Plugins` is turned ON in game settings.
+
 ## Run from source
 
 ### Dependencies:

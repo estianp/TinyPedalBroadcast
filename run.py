@@ -63,7 +63,7 @@ def get_cli_argument() -> argparse.Namespace:
             "-p",
             "--pyside",
             choices=(2, 6),
-            default=2,
+            default=6,
             type=int,
             help=(
                 "set PySide (Qt for Python) version:"
@@ -99,7 +99,7 @@ if __name__ == "__main__":
     cli_args = get_cli_argument()
 
     # Check whether to override PySide version
-    pyside_override = getattr(cli_args, "pyside", 2)
+    pyside_override = getattr(cli_args, "pyside", 6)
     os.environ["PYSIDE_OVERRIDE"] = f"{pyside_override}"  # store to env
     override_pyside_version(pyside_override)
 

@@ -21,6 +21,7 @@ Spectate list view
 """
 
 import logging
+from time import monotonic
 
 from PySide2.QtCore import Qt, Slot, QTimer
 from PySide2.QtGui import QColor
@@ -51,6 +52,7 @@ SORT_LABELS = ("Standings", "Relative")
 BATTLE_THRESHOLD = 1.0  # seconds
 CLOSE_THRESHOLD = 2.0  # seconds
 YELLOW_SPEED_THRESHOLD = 8  # m/s
+YELLOW_STICKY_DURATION = 5.0  # seconds to keep yellow highlight after clearing
 COLOR_BATTLE = QColor(220, 30, 30)  # red
 COLOR_CLOSE = QColor(255, 140, 0)  # orange
 COLOR_YELLOW = QColor(255, 255, 0)  # yellow
@@ -65,6 +67,7 @@ class SpectateList(QWidget):
         super().__init__(parent)
         self.last_enabled = None
         self._sort_mode = SORT_STANDINGS
+        self._yellow_timestamps = {}  # driver_index -> last time yellow was active
 
         # Label
         self.label_spectating = QLabel("")
@@ -236,10 +239,8 @@ class SpectateList(QWidget):
             driver_place = api.read.vehicle.place(driver_index)
             driver_class = api.read.vehicle.class_name(driver_index)
             in_pits = api.read.vehicle.in_pits(driver_index) or api.read.vehicle.in_garage(driver_index)
-            is_yellow = not in_pits and api.read.vehicle.speed(driver_index) < YELLOW_SPEED_THRESHOLD
+            is_yellow = self._check_yellow(driver_index, in_pits)
             is_blue = api.read.session.blue_flag(driver_index)
-
-            # Calculate relative gap
             if driver_index == selected_index or laptime_est <= 0 or selected_index < 0:
                 rel_gap = 0.0
             else:
@@ -344,7 +345,7 @@ class SpectateList(QWidget):
             driver_place = api.read.vehicle.place(driver_index)
             driver_class = api.read.vehicle.class_name(driver_index)
             in_pits = api.read.vehicle.in_pits(driver_index) or api.read.vehicle.in_garage(driver_index)
-            is_yellow = not in_pits and api.read.vehicle.speed(driver_index) < YELLOW_SPEED_THRESHOLD
+            is_yellow = self._check_yellow(driver_index, in_pits)
             is_blue = api.read.session.blue_flag(driver_index)
 
             if driver_index == selected_index or laptime_est <= 0:
@@ -423,6 +424,25 @@ class SpectateList(QWidget):
         self.button_sort.setText(SORT_LABELS[self._sort_mode])
         if cfg.api["enable_player_index_override"]:
             self.update_drivers(self.selected_name(), cfg.api["player_index"], False)
+
+    def _check_yellow(self, driver_index: int, in_pits: bool) -> bool:
+        """Check yellow flag with sticky duration
+
+        Returns True if the driver is currently slow on track,
+        or was slow within the last YELLOW_STICKY_DURATION seconds.
+        """
+        if in_pits:
+            self._yellow_timestamps.pop(driver_index, None)
+            return False
+        now = monotonic()
+        if api.read.vehicle.speed(driver_index) < YELLOW_SPEED_THRESHOLD:
+            self._yellow_timestamps[driver_index] = now
+            return True
+        last_yellow = self._yellow_timestamps.get(driver_index)
+        if last_yellow is not None and now - last_yellow < YELLOW_STICKY_DURATION:
+            return True
+        self._yellow_timestamps.pop(driver_index, None)
+        return False
 
     @staticmethod
     def _calc_class_positions(driver_list):
