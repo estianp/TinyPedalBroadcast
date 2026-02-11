@@ -57,10 +57,11 @@ CLOSE_THRESHOLD = 2.0  # seconds
 LAPPING_THRESHOLD = 3.0  # seconds proximity to blue-flagged car
 YELLOW_SPEED_THRESHOLD = 8  # m/s
 YELLOW_STICKY_DURATION = 5.0  # seconds to keep yellow highlight after clearing
-COLOR_BATTLE = QColor(220, 30, 30)  # red
+COLOR_BATTLE = QColor(34, 139, 34)  # green
 COLOR_CLOSE = QColor(255, 140, 0)  # orange
 COLOR_YELLOW = QColor(255, 255, 0)  # yellow
 COLOR_BLUE = QColor(0, 160, 255)  # blue
+COLOR_PENALTY = QColor(220, 30, 30)  # red
 COLOR_PIT = QColor(150, 150, 150)  # grey
 
 
@@ -492,7 +493,10 @@ class BroadcastList(QWidget):
                     display_text = f"P{class_pos:<2d} {padded_name} {ve_str}{tags}"
                 item = QListWidgetItem(display_text)
                 item.setData(Qt.UserRole, name)
-                if is_yellow:
+                has_penalty = penalty_tag != ""
+                if has_penalty:
+                    item.setForeground(COLOR_PENALTY)
+                elif is_yellow:
                     item.setForeground(COLOR_YELLOW)
                 elif is_blue:
                     item.setForeground(COLOR_BLUE)
