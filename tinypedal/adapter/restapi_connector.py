@@ -26,11 +26,12 @@ import asyncio
 import json
 import logging
 import threading
+from asyncio import open_connection, wait_for
 from itertools import chain
 from typing import Any, NamedTuple
 
 from .. import realtime_state
-from ..async_request import get_response, http_get, set_header_get, set_header_post
+from ..async_request import get_response, http_get, set_header_get, set_header_post, set_header_put
 from ..const_common import TYPE_JSON
 from .rf2_restapi import ResRawOutput, RestAPIData
 
@@ -103,15 +104,32 @@ class RestAPIInfo:
         host = self._cfg["url_host"]
         port = self._cfg["url_port"]
         timeout = min(max(self._cfg["connection_timeout"], 0.5), 10)
-        body = f'{{"slotID":{slot_id}}}'
-        request = set_header_post("/rest/watch/onTrack", host, body)
+        request = set_header_put(f"/rest/watch/focus/{slot_id}", host)
+
+        async def _put():
+            writer = None
+            try:
+                reader, writer = await wait_for(open_connection(host, port), timeout)
+                writer.write(request)
+                await writer.drain()
+                header = await wait_for(reader.readuntil(b"\r\n\r\n"), timeout)
+                if b"200" in header:
+                    logger.info("RestAPI: WATCH: focused on slot %s", slot_id)
+                else:
+                    status = header.decode(errors="replace").split("\r\n", 1)[0]
+                    logger.warning("RestAPI: WATCH: slot %s rejected - %s", slot_id, status)
+            except (ConnectionError, TimeoutError, OSError) as err:
+                logger.warning("RestAPI: WATCH: slot %s failed - %s", slot_id, err)
+            finally:
+                if writer is not None:
+                    writer.close()
+                    await writer.wait_closed()
 
         def _send():
             try:
-                asyncio.run(get_response(request, host, port, timeout))
-                logger.info("RestAPI: WATCH: requested slot %s", slot_id)
-            except BaseException:
-                logger.warning("RestAPI: WATCH: failed for slot %s", slot_id)
+                asyncio.run(_put())
+            except BaseException as err:
+                logger.warning("RestAPI: WATCH: slot %s failed - %s", slot_id, err)
 
         threading.Thread(target=_send, daemon=True).start()
 

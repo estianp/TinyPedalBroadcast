@@ -78,6 +78,9 @@ class SpectateList(QWidget):
         self.button_spectate = QPushButton("Spectate")
         self.button_spectate.clicked.connect(self.spectate_selected)
 
+        self.button_focus = QPushButton("Focus Camera")
+        self.button_focus.clicked.connect(self.focus_camera)
+
         self.button_refresh = QPushButton("Refresh")
         self.button_refresh.clicked.connect(self.refresh)
 
@@ -90,6 +93,7 @@ class SpectateList(QWidget):
 
         layout_button = QHBoxLayout()
         layout_button.addWidget(self.button_spectate)
+        layout_button.addWidget(self.button_focus)
         layout_button.addWidget(self.button_refresh)
         layout_button.addWidget(self.button_sort)
         layout_button.addStretch(1)
@@ -179,6 +183,7 @@ class SpectateList(QWidget):
         self.button_toggle.setText("Enabled" if enabled else "Disabled")
         self.listbox_spectate.setDisabled(not enabled)
         self.button_spectate.setDisabled(not enabled)
+        self.button_focus.setDisabled(not enabled)
         self.button_refresh.setDisabled(not enabled)
         self.button_sort.setDisabled(not enabled)
         self.label_spectating.setDisabled(not enabled)
@@ -201,6 +206,21 @@ class SpectateList(QWidget):
     def spectate_selected(self):
         """Spectate selected player"""
         self.update_drivers(self.selected_name(), -1, True)
+        self.focus_camera()
+
+    def focus_camera(self):
+        """Switch in-game camera to the currently spectated driver"""
+        index = cfg.api["player_index"]
+        if index < 0 or not cfg.api["enable_player_index_override"]:
+            return
+        try:
+            total = api.read.vehicle.total_vehicles()
+            if index >= total:
+                return
+            slot_id = api.read.vehicle.slot_id(index)
+            api.watch_vehicle(slot_id)
+        except (AttributeError, IndexError):
+            pass
 
     def update_drivers(self, selected_driver_name: str, selected_index: int, match_name: bool):
         """Update drivers list"""
@@ -263,7 +283,7 @@ class SpectateList(QWidget):
                 tags += "  [YELLOW]"
             if is_blue:
                 tags += "  [BLUE]"
-            if _index in battles:
+            if not is_yellow and not is_blue and _index in battles:
                 tags += "  [BATTLE]"
             if self._sort_mode == SORT_RELATIVE:
                 gap_str = f"+{rel_gap:.1f}" if rel_gap >= 0 else f"{rel_gap:.1f}"
@@ -364,7 +384,7 @@ class SpectateList(QWidget):
                 tags += "  [YELLOW]"
             if is_blue:
                 tags += "  [BLUE]"
-            if _index in battles:
+            if not is_yellow and not is_blue and _index in battles:
                 tags += "  [BATTLE]"
             if self._sort_mode == SORT_RELATIVE:
                 gap_str = f"+{rel_gap:.1f}" if rel_gap >= 0 else f"{rel_gap:.1f}"
@@ -442,10 +462,10 @@ class SpectateList(QWidget):
         if laptime_est <= 0:
             return battles, close
 
-        # Group on-track drivers by class (exclude pitting drivers)
+        # Group on-track drivers by class (exclude pitting, yellow, blue flagged)
         classes = {}
-        for _place, cls, _name, idx, _gap, in_pits, *_ in driver_list:
-            if not in_pits:
+        for _place, cls, _name, idx, _gap, in_pits, is_yellow, is_blue in driver_list:
+            if not in_pits and not is_yellow and not is_blue:
                 classes.setdefault(cls, []).append(idx)
 
         half_lap = laptime_est * 0.5

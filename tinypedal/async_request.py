@@ -51,6 +51,11 @@ def set_header_post(uri: str = "/", host: str = "localhost", body: str = "") -> 
     ).encode()
 
 
+def set_header_put(uri: str = "/", host: str = "localhost") -> bytes:
+    """Set PUT request header (no body)"""
+    return f"PUT {uri} HTTP/1.1\r\nHost: {host}\r\nContent-Length: 0\r\n\r\n".encode()
+
+
 async def parse_response(reader: StreamReader) -> bytes:
     """Parse response"""
     # Get headers
