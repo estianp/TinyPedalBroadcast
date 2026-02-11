@@ -30,7 +30,7 @@ from itertools import chain
 from typing import Any, NamedTuple
 
 from .. import realtime_state
-from ..async_request import http_get, set_header_get
+from ..async_request import get_response, http_get, set_header_get, set_header_post
 from ..const_common import TYPE_JSON
 from .rf2_restapi import ResRawOutput, RestAPIData
 
@@ -93,6 +93,27 @@ class RestAPIInfo:
             self._update_thread = threading.Thread(target=self.__update, daemon=True)
             self._update_thread.start()
             logger.info("RestAPI: UPDATING: thread started")
+
+    def watch_vehicle(self, slot_id: int):
+        """Request game to switch spectator camera target via Rest API"""
+        if not self._cfg or not self._cfg.get("enable_restapi_access"):
+            return
+        if slot_id < 0:
+            return
+        host = self._cfg["url_host"]
+        port = self._cfg["url_port"]
+        timeout = min(max(self._cfg["connection_timeout"], 0.5), 10)
+        body = f'{{"slotID":{slot_id}}}'
+        request = set_header_post("/rest/watch/onTrack", host, body)
+
+        def _send():
+            try:
+                asyncio.run(get_response(request, host, port, timeout))
+                logger.info("RestAPI: WATCH: requested slot %s", slot_id)
+            except BaseException:
+                logger.warning("RestAPI: WATCH: failed for slot %s", slot_id)
+
+        threading.Thread(target=_send, daemon=True).start()
 
     def stop(self):
         """Stop update thread"""

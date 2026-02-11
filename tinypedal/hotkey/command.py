@@ -160,6 +160,7 @@ def hotkey_spectate_next_driver():
             cfg.api["player_index"] = player_index
             api.setup()
             cfg.save()
+            api.watch_vehicle(api.read.vehicle.slot_id(player_index))
             return
 
 
@@ -176,6 +177,7 @@ def hotkey_spectate_previous_driver():
             cfg.api["player_index"] = player_index
             api.setup()
             cfg.save()
+            api.watch_vehicle(api.read.vehicle.slot_id(player_index))
             return
 
 

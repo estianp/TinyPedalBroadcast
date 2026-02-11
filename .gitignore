@@ -27,3 +27,9 @@ test*.py
 *.zip
 *.log
 *.db
+
+# Copilot snapshots
+.copilot/
+
+# Visual Studio
+.vs/

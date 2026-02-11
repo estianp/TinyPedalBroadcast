@@ -39,6 +39,18 @@ def set_header_get(uri: str = "/", host: str = "localhost", *headers: str) -> by
     return f"GET {uri} HTTP/1.1\r\nHost: {host}{extra_headers}\r\n\r\n".encode()
 
 
+def set_header_post(uri: str = "/", host: str = "localhost", body: str = "") -> bytes:
+    """Set POST request header with body"""
+    return (
+        f"POST {uri} HTTP/1.1\r\n"
+        f"Host: {host}\r\n"
+        f"Content-Type: application/json\r\n"
+        f"Content-Length: {len(body)}\r\n"
+        f"\r\n"
+        f"{body}"
+    ).encode()
+
+
 async def parse_response(reader: StreamReader) -> bytes:
     """Parse response"""
     # Get headers

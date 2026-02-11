@@ -123,6 +123,16 @@ class APIControl:
         realtime_state.spectating = setting_api["enable_player_index_override"]
         self._api.setup(setting_api)
 
+    def watch_vehicle(self, slot_id: int):
+        """Request game to spectate vehicle by slot id (if supported)"""
+        restapi = getattr(self._api, "restapi", None)
+        if restapi is None:
+            return
+        try:
+            restapi.watch_vehicle(slot_id)
+        except AttributeError:
+            logger.warning("CONNECTING: RestAPI watch not supported by %s", self._api.NAME)
+
     @property
     def available(self):
         """Available API"""
