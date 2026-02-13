@@ -210,9 +210,8 @@ class BroadcastList(QWidget):
 
         damage_layout.addWidget(self.label_integrity)
         damage_layout.addWidget(self.bar_integrity)
-        damage_layout.addWidget(self.label_body)
-        damage_layout.addWidget(self.label_aero)
-        damage_layout.addWidget(self.label_susp)
+        # Body, aero and suspension labels are temporarily removed from the UI
+        # to keep the panel compact while logic remains intact.
         damage_layout.addWidget(self.label_detached)
         damage_layout.addStretch(1)
         self.damage_group.setLayout(damage_layout)
@@ -666,13 +665,29 @@ class BroadcastList(QWidget):
     def _format_ve(driver_index: int) -> str:
         """Format virtual energy remaining for driver list"""
         try:
-            veh = minfo.vehicles.dataSet[driver_index]
-            if not veh.driverName:
+            # First try legacy module data which may be available for all cars
+            try:
+                veh = minfo.vehicles.dataSet[driver_index]
+                if not veh.driverName:
+                    return "               "
+                ve_legacy = getattr(veh, "energyRemaining", None)
+                if ve_legacy is not None and ve_legacy > -1.0:
+                    pct = max(0, min(100, int(ve_legacy * 100)))
+                    filled = pct // 10
+                    bar = "|" * filled + "." * (10 - filled)
+                    return f"[{bar}]{pct:3d}%"
+            except Exception:
+                # ignore and fall back to reader API
+                pass
+
+            # Fall back to reader API when legacy data not available
+            max_e = api.read.vehicle.max_virtual_energy(driver_index)
+            if not max_e:
                 return "               "
-            ve = veh.energyRemaining
-            if ve <= -1.0:
+            ve = api.read.vehicle.virtual_energy(driver_index)
+            if ve is None:
                 return "               "
-            pct = max(0, min(100, int(ve * 100)))
+            pct = max(0, min(100, int(ve / max_e * 100)))
             filled = pct // 10
             bar = "|" * filled + "." * (10 - filled)
             return f"[{bar}]{pct:3d}%"
@@ -859,10 +874,12 @@ class BroadcastList(QWidget):
     def _update_energy(self, index: int):
         """Update virtual energy bar for spectated driver"""
         try:
-            veh_data = minfo.vehicles.dataSet[index]
-            ve_remaining = veh_data.energyRemaining
-            if ve_remaining > -1.0 and veh_data.driverName:
-                pct_e = max(0.0, min(1.0, ve_remaining))
+            # Use reader API when available: virtual energy value and max
+            max_e = api.read.vehicle.max_virtual_energy(index)
+            ve = api.read.vehicle.virtual_energy(index) if max_e else None
+            # Fallback to minfo dataset if reader API missing
+            if max_e and ve is not None:
+                pct_e = max(0.0, min(1.0, ve / max_e))
                 pct_e_int = int(pct_e * 1000)
                 self.bar_energy.setValue(pct_e_int)
                 self.label_energy.setText(f"Energy: <b>{pct_e:.1%}</b>")
@@ -877,8 +894,31 @@ class BroadcastList(QWidget):
                     f"QProgressBar::chunk {{ background: {color}; border-radius: 3px; }}"
                 )
             else:
-                self.bar_energy.setValue(0)
-                self.label_energy.setText("Energy: <b>N/A</b>")
+                # Try legacy minfo dataset
+                try:
+                    veh_data = minfo.vehicles.dataSet[index]
+                    ve_remaining = veh_data.energyRemaining
+                    if ve_remaining > -1.0 and veh_data.driverName:
+                        pct_e = max(0.0, min(1.0, ve_remaining))
+                        pct_e_int = int(pct_e * 1000)
+                        self.bar_energy.setValue(pct_e_int)
+                        self.label_energy.setText(f"Energy: <b>{pct_e:.1%}</b>")
+                        if pct_e > 0.4:
+                            color = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #2980b9, stop:1 #3498db)"
+                        elif pct_e > 0.15:
+                            color = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #d35400, stop:1 #f39c12)"
+                        else:
+                            color = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #c0392b, stop:1 #e74c3c)"
+                        self.bar_energy.setStyleSheet(
+                            "QProgressBar { background: #333; border: 1px solid #555; border-radius: 4px; }"
+                            f"QProgressBar::chunk {{ background: {color}; border-radius: 3px; }}"
+                        )
+                    else:
+                        self.bar_energy.setValue(0)
+                        self.label_energy.setText("Energy: <b>N/A</b>")
+                except (AttributeError, IndexError):
+                    self.bar_energy.setValue(0)
+                    self.label_energy.setText("Energy: <b>N/A</b>")
         except (AttributeError, IndexError):
             pass
 
@@ -913,20 +953,42 @@ class BroadcastList(QWidget):
 
             # Aero damage
             aero = api.read.vehicle.aero_damage(index)
-            if aero <= 0:
+            # aero may be None or a fraction 0.0-1.0
+            if aero is None or aero <= 0:
                 self.label_aero.setText("Aero: <b>OK</b>")
-            elif aero < 0.5:
-                self.label_aero.setText(f"Aero: <b style='color:#f39c12'>{aero:.0%}</b>")
             else:
-                self.label_aero.setText(f"Aero: <b style='color:#e74c3c'>{aero:.0%}</b>")
+                # Use percent display and color thresholds
+                try:
+                    if aero < 0.5:
+                        self.label_aero.setText(f"Aero: <b style='color:#f39c12'>{aero:.0%}</b>")
+                    else:
+                        self.label_aero.setText(f"Aero: <b style='color:#e74c3c'>{aero:.0%}</b>")
+                except Exception:
+                    self.label_aero.setText("Aero: <b>N/A</b>")
 
             # Suspension damage
+            # suspension_damage() returns a tuple of per-wheel fractions (0.0-1.0)
             susp = api.read.wheel.suspension_damage(index)
-            susp_total = sum(susp) if susp else 0
-            if susp_total <= 0:
+            try:
+                if not susp:
+                    max_susp = 0.0
+                else:
+                    # consider the worst wheel
+                    max_susp = max(float(x) for x in susp)
+            except Exception:
+                max_susp = 0.0
+
+            # Thresholds (match widget defaults): light, medium, heavy, totaled
+            if max_susp <= 0:
                 self.label_susp.setText("Susp: <b>OK</b>")
+            elif max_susp < 0.02:
+                self.label_susp.setText(f"Susp: <b style='color:#f39c12'>Minor</b>")
+            elif max_susp < 0.15:
+                self.label_susp.setText(f"Susp: <b style='color:#f39c12'>Light</b>")
+            elif max_susp < 0.4:
+                self.label_susp.setText(f"Susp: <b style='color:#e74c3c'>Heavy</b>")
             else:
-                self.label_susp.setText(f"Susp: <b style='color:#e74c3c'>DMG</b>")
+                self.label_susp.setText(f"Susp: <b style='color:#e74c3c'>Totaled</b>")
 
             # Detached parts
             if api.read.vehicle.is_detached(index):
