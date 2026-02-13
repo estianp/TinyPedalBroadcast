@@ -664,16 +664,18 @@ class BroadcastList(QWidget):
     @staticmethod
     def _format_ve(driver_index: int) -> str:
         """Format virtual energy remaining for driver list"""
-        pct_f = BroadcastList._read_ve_fraction(driver_index)
-        if pct_f is None:
-            return "               "
+        # Use only per-index readers for the driver list (no global LMU fallback)
+        pct_f = BroadcastList._read_ve_fraction(driver_index, allow_global=False)
+        # Hide the bar for vehicles that don't support VE or return 0
+        if pct_f is None or pct_f <= 0.0:
+            return ""
         pct = int(max(0.0, min(1.0, pct_f)) * 100)
         filled = pct // 10
         bar = "|" * filled + "." * (10 - filled)
         return f"[{bar}]{pct:3d}%"
 
     @staticmethod
-    def _read_ve_fraction(driver_index: int) -> float | None:
+    def _read_ve_fraction(driver_index: int, allow_global: bool = True) -> float | None:
         """Read virtual energy and return fraction 0..1 or None if unavailable.
 
         This helper centralizes logic so the driver list and the bottom
