@@ -63,6 +63,8 @@ COLOR_YELLOW = QColor(255, 255, 0)  # yellow
 COLOR_BLUE = QColor(0, 160, 255)  # blue
 COLOR_PENALTY = QColor(220, 30, 30)  # red
 COLOR_PIT = QColor(150, 150, 150)  # grey
+VE_STR_WIDTH = 16
+STATUS_GAP = 6
 
 
 class BroadcastList(QWidget):
@@ -461,10 +463,28 @@ class BroadcastList(QWidget):
                 sep = QListWidgetItem("")
                 sep.setFlags(Qt.NoItemFlags)
                 listbox.addItem(sep)
-            # Class header
-            header = QListWidgetItem(f"--- {cls} ---")
+            # Class header with column labels aligned to item columns
+            # Determine initial padding for relative mode (gap column)
+            prefix = "      " if self._sort_mode == SORT_RELATIVE else ""
+            # Columns: pos(3)+space(1)+name(20)+space(1) => 25 chars before VE column
+            name_col_width = 25
+            ve_col_width = 15
+            # Build header text: class name left, then VE header centered over VE column,
+            # then gap and status header further right
+            cls_label = f"--- {cls} ---"
+            header_text = prefix + cls_label.ljust(name_col_width)
+            header_text += "VE".center(VE_STR_WIDTH)
+            header_text += " " * STATUS_GAP + "status"
+            header = QListWidgetItem(header_text)
             header.setFlags(Qt.NoItemFlags)
-            header.setForeground(QColor("#888888"))
+            # Style header for contrast: bold font, dark background, light text
+            hdr_font = QFont(self.listbox_spectate.font())
+            hdr_font.setBold(True)
+            hdr_font.setPointSize(max(9, hdr_font.pointSize()))
+            header.setFont(hdr_font)
+            header.setBackground(QColor("#2f2f2f"))
+            header.setForeground(QColor("#f0f0f0"))
+            header.setTextAlignment(Qt.AlignLeft)
             listbox.addItem(header)
             first_class = False
 
@@ -485,11 +505,15 @@ class BroadcastList(QWidget):
                 if not is_yellow and not is_blue and not is_lapping and _index in battles:
                     tags += " BTL"
                 padded_name = name[:20].ljust(20)
+                # Ensure VE column always occupies VE_STR_WIDTH characters so items align
+                ve_col = ve_str.ljust(VE_STR_WIDTH)
+                # Move status tags further right to align under Status header
+                status_pad = " " * STATUS_GAP
                 if self._sort_mode == SORT_RELATIVE:
                     gap_str = f"+{rel_gap:.1f}" if rel_gap >= 0 else f"{rel_gap:.1f}"
-                    display_text = f"{gap_str:>6s} P{class_pos:<2d} {padded_name} {ve_str}{tags}"
+                    display_text = f"{gap_str:>6s} P{class_pos:<2d} {padded_name} {ve_col}{status_pad}{tags}"
                 else:
-                    display_text = f"P{class_pos:<2d} {padded_name} {ve_str}{tags}"
+                    display_text = f"P{class_pos:<2d} {padded_name} {ve_col}{status_pad}{tags}"
                 item = QListWidgetItem(display_text)
                 item.setData(Qt.UserRole, name)
                 has_penalty = penalty_tag != ""
