@@ -30,12 +30,15 @@ from PySide2.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
-    QListWidget,
-    QListWidgetItem,
+    QVBoxLayout,
+    QTableWidget,
+    QTableWidgetItem,
     QProgressBar,
     QPushButton,
     QVBoxLayout,
     QWidget,
+    QHeaderView,
+    QSizePolicy,
 )
 
 from .. import app_signal
@@ -80,17 +83,40 @@ class BroadcastList(QWidget):
         # Label
         self.label_spectating = QLabel("")
 
-        # List box
-        self.listbox_spectate = QListWidget(self)
+        # Table for drivers
+        self.listbox_spectate = QTableWidget(self)
         self.listbox_spectate.setAlternatingRowColors(True)
-        self.listbox_spectate.itemDoubleClicked.connect(self.spectate_selected)
         driver_font = QFont("Consolas", 10)
         self.listbox_spectate.setFont(driver_font)
+        # Use stylesheet to add stronger column separators and keep selection styling
         self.listbox_spectate.setStyleSheet(
-            "QListWidget { border: 1px solid #555; border-radius: 3px; }"
-            "QListWidget::item { padding: 2px 4px; }"
-            "QListWidget::item:selected { background: #2980b9; color: white; }"
+            "QTableWidget { border: 1px solid #555; border-radius: 3px; }"
+            "QTableWidget::item { padding: 2px 4px; border-right: 1px solid #444; }"
+            "QTableWidget::item:selected { background: #2980b9; color: white; }"
+            "QHeaderView::section { background: #2f2f2f; color: #f0f0f0; border-right: 2px solid #555; }"
         )
+        # show grid and use solid lines for clearer separators
+        try:
+            self.listbox_spectate.setShowGrid(True)
+            self.listbox_spectate.setGridStyle(Qt.SolidLine)
+        except Exception:
+            pass
+        # Columns: Name, VE, Status, Top Spd, Best
+        headers = ["Name", "VE", "Status", "Top Spd", "Best"]
+        self.listbox_spectate.setColumnCount(len(headers))
+        self.listbox_spectate.setHorizontalHeaderLabels(headers)
+        # Auto-scale columns to fill available space
+        self.listbox_spectate.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        # Allow the table to expand to fill available layout space
+        self.listbox_spectate.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.listbox_spectate.cellDoubleClicked.connect(lambda r, c: self.spectate_selected())
+        # hide the vertical row headers (remove visible row lines on the left)
+        try:
+            self.listbox_spectate.verticalHeader().setVisible(False)
+            # make rows stretch to fill vertical space
+            self.listbox_spectate.verticalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        except Exception:
+            pass
 
         # Button
         self.button_spectate = QPushButton("Spectate")
@@ -271,7 +297,11 @@ class BroadcastList(QWidget):
         if enabled:
             self.update_drivers("Anonymous", cfg.api["player_index"], False)
         else:
-            self.listbox_spectate.clear()
+            # clear rows only, keep headers
+            try:
+                self.listbox_spectate.setRowCount(0)
+            except Exception:
+                self.listbox_spectate.clear()
             self.label_spectating.setText("Spectating: <b>Disabled</b>")
 
         # Update button state only if changed
@@ -367,28 +397,42 @@ class BroadcastList(QWidget):
         class_positions = self._calc_class_positions(driver_list)
         battles, close = self._find_battles(driver_list, laptime_est)
 
-        self._populate_listbox(listbox, driver_list, class_positions, battles, close, laptime_est)
+        self._populate_table(listbox, driver_list, class_positions, battles, close, laptime_est)
         self.focus_on_selected(selected_driver_name)
         self.save_selected_index(selected_index)
 
     def focus_on_selected(self, driver_name: str):
         """Focus on selected driver row"""
         listbox = self.listbox_spectate
-        for row_index in range(listbox.count()):
-            if driver_name == listbox.item(row_index).data(Qt.UserRole):
+        # For table, find the row with matching UserRole and select it
+        row_index = None
+        for r in range(self.listbox_spectate.rowCount()):
+            it = self.listbox_spectate.item(r, 0)
+            if it and it.data(Qt.UserRole) == driver_name:
+                row_index = r
                 break
-        else:  # fallback to 0 if name not found
+        if row_index is None:
             row_index = 0
-        listbox.setCurrentRow(row_index)
+        try:
+            self.listbox_spectate.selectRow(row_index)
+        except Exception:
+            pass
         # Make sure selected name valid
         self.label_spectating.setText(f"Spectating: <b>{self.selected_name()}</b>")
 
     def selected_name(self) -> str:
         """Selected driver name"""
-        selected_item = self.listbox_spectate.currentItem()
-        if selected_item is None:
+        # Attempt to retrieve selected row's driver name from column 0
+        try:
+            sel = self.listbox_spectate.currentRow()
+            if sel is None or sel < 0:
+                return "Anonymous"
+            it = self.listbox_spectate.item(sel, 0)
+            if it is None:
+                return "Anonymous"
+            return it.data(Qt.UserRole) or it.text() or "Anonymous"
+        except Exception:
             return "Anonymous"
-        return selected_item.data(Qt.UserRole) or "Anonymous"
 
     def _refresh_list_only(self):
         """Refresh the driver list without saving selection (for auto-update)"""
@@ -426,16 +470,14 @@ class BroadcastList(QWidget):
         class_positions = self._calc_class_positions(driver_list)
         battles, close = self._find_battles(driver_list, laptime_est)
 
-        self._populate_listbox(listbox, driver_list, class_positions, battles, close, laptime_est)
+        # Populate using table implementation
+        self._populate_table(listbox, driver_list, class_positions, battles, close, laptime_est)
         self.focus_on_selected(selected_driver_name)
 
-    def _populate_listbox(self, listbox, driver_list, class_positions, battles, close, laptime_est):
-        """Populate driver list grouped by class with separators"""
-        listbox.clear()
-
-        anon_item = QListWidgetItem("Anonymous")
-        anon_item.setData(Qt.UserRole, "Anonymous")
-        listbox.addItem(anon_item)
+    def _populate_table(self, table, driver_list, class_positions, battles, close, laptime_est):
+        """Populate QTableWidget with drivers grouped by class."""
+        # Clear existing rows but keep headers
+        table.setRowCount(0)
 
         # Find cars involved in lapping (near a blue-flagged car)
         lapping = self._find_lappers(driver_list, laptime_est)
@@ -443,93 +485,97 @@ class BroadcastList(QWidget):
         # Group drivers by class
         class_groups = {}
         for entry in driver_list:
-            cls = entry[1]  # class_name
+            cls = entry[1]
             class_groups.setdefault(cls, []).append(entry)
 
-        # Sort each class group internally by class position
+        # Sort groups
         for cls in class_groups:
             class_groups[cls].sort(key=lambda x: class_positions.get(x[3], x[0]))
 
-        # Order classes by best overall position (leader of each class)
-        sorted_classes = sorted(
-            class_groups.keys(),
-            key=lambda c: min(e[0] for e in class_groups[c])
-        )
+        sorted_classes = sorted(class_groups.keys(), key=lambda c: min(e[0] for e in class_groups[c]))
 
-        first_class = True
         for cls in sorted_classes:
-            # Add separator between classes
-            if not first_class:
-                sep = QListWidgetItem("")
-                sep.setFlags(Qt.NoItemFlags)
-                listbox.addItem(sep)
-            # Class header with column labels aligned to item columns
-            # Determine initial padding for relative mode (gap column)
-            prefix = "      " if self._sort_mode == SORT_RELATIVE else ""
-            # Columns: pos(3)+space(1)+name(20)+space(1) => 25 chars before VE column
-            name_col_width = 25
-            ve_col_width = 15
-            # Build header text: class name left, then VE header centered over VE column,
-            # then gap and status header further right
-            cls_label = f"--- {cls} ---"
-            header_text = prefix + cls_label.ljust(name_col_width)
-            header_text += "VE".center(VE_STR_WIDTH)
-            header_text += " " * STATUS_GAP + "status"
-            header = QListWidgetItem(header_text)
-            header.setFlags(Qt.NoItemFlags)
-            # Style header for contrast: bold font, dark background, light text
-            hdr_font = QFont(self.listbox_spectate.font())
-            hdr_font.setBold(True)
-            hdr_font.setPointSize(max(9, hdr_font.pointSize()))
-            header.setFont(hdr_font)
-            header.setBackground(QColor("#2f2f2f"))
-            header.setForeground(QColor("#f0f0f0"))
-            header.setTextAlignment(Qt.AlignLeft)
-            listbox.addItem(header)
-            first_class = False
+            # Add a header row for the class
+            row = table.rowCount()
+            table.insertRow(row)
+            hdr_item = QTableWidgetItem(f"--- {cls} ---")
+            hdr_item.setFlags(Qt.NoItemFlags)
+            hdr_item.setBackground(QColor("#2f2f2f"))
+            hdr_item.setForeground(QColor("#f0f0f0"))
+            hdr_item.setTextAlignment(Qt.AlignCenter)
+            table.setSpan(row, 0, 1, table.columnCount())
+            table.setItem(row, 0, hdr_item)
 
             for place, class_name, name, _index, rel_gap, in_pits, is_yellow, is_blue in class_groups[cls]:
+                row = table.rowCount()
+                table.insertRow(row)
                 class_pos = class_positions.get(_index, place)
                 ve_str = self._format_ve(_index)
                 penalty_tag = self._get_penalty_tag(_index)
                 is_lapping = _index in lapping
-                tags = ""
+                tags = []
                 if penalty_tag:
-                    tags += f" {penalty_tag}"
+                    tags.append(penalty_tag)
                 if in_pits:
-                    tags += " PIT"
+                    tags.append("PIT")
                 if is_yellow:
-                    tags += " YEL"
+                    tags.append("YEL")
                 if is_blue:
-                    tags += " BLU"
+                    tags.append("BLU")
                 if not is_yellow and not is_blue and not is_lapping and _index in battles:
-                    tags += " BTL"
-                padded_name = name[:20].ljust(20)
-                # Ensure VE column always occupies VE_STR_WIDTH characters so items align
-                ve_col = ve_str.ljust(VE_STR_WIDTH)
-                # Move status tags further right to align under Status header
-                status_pad = " " * STATUS_GAP
-                if self._sort_mode == SORT_RELATIVE:
-                    gap_str = f"+{rel_gap:.1f}" if rel_gap >= 0 else f"{rel_gap:.1f}"
-                    display_text = f"{gap_str:>6s} P{class_pos:<2d} {padded_name} {ve_col}{status_pad}{tags}"
-                else:
-                    display_text = f"P{class_pos:<2d} {padded_name} {ve_col}{status_pad}{tags}"
-                item = QListWidgetItem(display_text)
-                item.setData(Qt.UserRole, name)
-                has_penalty = penalty_tag != ""
-                if has_penalty:
-                    item.setForeground(COLOR_PENALTY)
+                    tags.append("BTL")
+                status_text = " ".join(tags)
+
+                # Name column (left-aligned)
+                name_item = QTableWidgetItem(f"P{class_pos:<2d} {name}")
+                name_item.setData(Qt.UserRole, name)
+                name_item.setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+                table.setItem(row, 0, name_item)
+
+                # VE: show percentage only (simple text) to avoid widget issues
+                ve_item = QTableWidgetItem(ve_str)
+                ve_item.setTextAlignment(Qt.AlignCenter)
+                table.setItem(row, 1, ve_item)
+
+                # Status - center
+                status_item = QTableWidgetItem(status_text)
+                status_item.setTextAlignment(Qt.AlignCenter)
+                table.setItem(row, 2, status_item)
+
+                # Top speed (from cache) - center
+                top_speed_kph = int(self._top_speeds.get(_index, 0.0) * 3.6)
+                top_item = QTableWidgetItem(f"{top_speed_kph} km/h")
+                top_item.setTextAlignment(Qt.AlignCenter)
+                table.setItem(row, 3, top_item)
+
+                # Best lap - center
+                try:
+                    best_lap = api.read.timing.best_laptime(_index)
+                except Exception:
+                    best_lap = 0.0
+                best_item = QTableWidgetItem(self._format_time(best_lap))
+                best_item.setTextAlignment(Qt.AlignCenter)
+                table.setItem(row, 4, best_item)
+
+                # Color row based on status
+                if penalty_tag:
+                    for c in range(table.columnCount()):
+                        table.item(row, c).setForeground(COLOR_PENALTY)
                 elif is_yellow:
-                    item.setForeground(COLOR_YELLOW)
+                    for c in range(table.columnCount()):
+                        table.item(row, c).setForeground(COLOR_YELLOW)
                 elif is_blue:
-                    item.setForeground(COLOR_BLUE)
+                    for c in range(table.columnCount()):
+                        table.item(row, c).setForeground(COLOR_BLUE)
                 elif in_pits:
-                    item.setForeground(COLOR_PIT)
+                    for c in range(table.columnCount()):
+                        table.item(row, c).setForeground(COLOR_PIT)
                 elif not is_lapping and _index in battles:
-                    item.setForeground(COLOR_BATTLE)
+                    for c in range(table.columnCount()):
+                        table.item(row, c).setForeground(COLOR_BATTLE)
                 elif not is_lapping and _index in close:
-                    item.setForeground(COLOR_CLOSE)
-                listbox.addItem(item)
+                    for c in range(table.columnCount()):
+                        table.item(row, c).setForeground(COLOR_CLOSE)
 
     @staticmethod
     def save_selected_index(index: int):
@@ -540,6 +586,7 @@ class BroadcastList(QWidget):
             cfg.save()
         if cfg.api["enable_player_index_override"] and index >= 0:
             api.watch_vehicle(api.read.vehicle.slot_id(index))
+
 
     def _toggle_sort_mode(self):
         """Toggle between standings and relative sort order"""
@@ -694,9 +741,8 @@ class BroadcastList(QWidget):
         if pct_f is None or pct_f <= 0.0:
             return ""
         pct = int(max(0.0, min(1.0, pct_f)) * 100)
-        filled = pct // 10
-        bar = "|" * filled + "." * (10 - filled)
-        return f"[{bar}]{pct:3d}%"
+        # Show only percentage value (no bar) in the driver list
+        return f"{pct:3d}%"
 
     @staticmethod
     def _read_ve_fraction(driver_index: int, allow_global: bool = True) -> float | None:
