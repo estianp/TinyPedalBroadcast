@@ -664,6 +664,64 @@ class BroadcastList(QWidget):
     @staticmethod
     def _format_ve(driver_index: int) -> str:
         """Format virtual energy remaining for driver list"""
+        pct_f = BroadcastList._read_ve_fraction(driver_index)
+        if pct_f is None:
+            return "               "
+        pct = int(max(0.0, min(1.0, pct_f)) * 100)
+        filled = pct // 10
+        bar = "|" * filled + "." * (10 - filled)
+        return f"[{bar}]{pct:3d}%"
+
+    @staticmethod
+    def _read_ve_fraction(driver_index: int) -> float | None:
+        """Read virtual energy and return fraction 0..1 or None if unavailable.
+
+        This helper centralizes logic so the driver list and the bottom
+        progress bar use the same source and interpretation.
+        """
+        try:
+            # Try legacy minfo dataset first (fraction 0..1)
+            try:
+                veh = minfo.vehicles.dataSet[driver_index]
+                if getattr(veh, "driverName", "") and hasattr(veh, "energyRemaining"):
+                    ve_legacy = getattr(veh, "energyRemaining")
+                    if ve_legacy is not None and ve_legacy > -1.0:
+                        return max(0.0, min(1.0, float(ve_legacy)))
+            except Exception:
+                pass
+
+            # Reader API: attempt to read both ve and max_e and infer units
+            ve = None
+            max_e = None
+            try:
+                ve = api.read.vehicle.virtual_energy(driver_index)
+            except Exception:
+                ve = None
+            try:
+                max_e = api.read.vehicle.max_virtual_energy(driver_index)
+            except Exception:
+                max_e = None
+
+            if ve is None:
+                return None
+
+            # If max_e present and non-zero, treat ve as absolute and compute fraction
+            if max_e:
+                try:
+                    return max(0.0, min(1.0, float(ve) / float(max_e)))
+                except Exception:
+                    return None
+
+            # If ve present but no max_e, infer whether ve is percent (0-100) or fraction
+            try:
+                v = float(ve)
+                if v > 1.0:
+                    return max(0.0, min(1.0, v / 100.0))
+                return max(0.0, min(1.0, v))
+            except Exception:
+                return None
+        except (AttributeError, IndexError):
+            return None
         try:
             # First try legacy module data which may be available for all cars
             try:
@@ -672,22 +730,43 @@ class BroadcastList(QWidget):
                     return "               "
                 ve_legacy = getattr(veh, "energyRemaining", None)
                 if ve_legacy is not None and ve_legacy > -1.0:
-                    pct = max(0, min(100, int(ve_legacy * 100)))
+                    # legacy value is fraction 0..1
+                    pct_f = max(0.0, min(1.0, float(ve_legacy)))
+                    pct = int(pct_f * 100)
                     filled = pct // 10
                     bar = "|" * filled + "." * (10 - filled)
                     return f"[{bar}]{pct:3d}%"
             except Exception:
                 # ignore and fall back to reader API
                 pass
+            # Fall back to reader API when legacy data not available.
+            # Support both absolute (ve/max_e) and percentage (0-100) readers.
+            try:
+                ve = api.read.vehicle.virtual_energy(driver_index)
+            except Exception:
+                ve = None
+            try:
+                max_e = api.read.vehicle.max_virtual_energy(driver_index)
+            except Exception:
+                max_e = None
 
-            # Fall back to reader API when legacy data not available
-            max_e = api.read.vehicle.max_virtual_energy(driver_index)
-            if not max_e:
+            pct_f = None
+            if ve is not None and max_e:
+                try:
+                    pct_f = float(ve) / float(max_e) if float(max_e) != 0 else None
+                except Exception:
+                    pct_f = None
+            elif ve is not None:
+                try:
+                    v = float(ve)
+                    pct_f = v / 100.0 if v > 1.0 else v
+                except Exception:
+                    pct_f = None
+
+            if pct_f is None:
                 return "               "
-            ve = api.read.vehicle.virtual_energy(driver_index)
-            if ve is None:
-                return "               "
-            pct = max(0, min(100, int(ve / max_e * 100)))
+            pct_f = max(0.0, min(1.0, pct_f))
+            pct = int(pct_f * 100)
             filled = pct // 10
             bar = "|" * filled + "." * (10 - filled)
             return f"[{bar}]{pct:3d}%"
@@ -874,51 +953,26 @@ class BroadcastList(QWidget):
     def _update_energy(self, index: int):
         """Update virtual energy bar for spectated driver"""
         try:
-            # Use reader API when available: virtual energy value and max
-            max_e = api.read.vehicle.max_virtual_energy(index)
-            ve = api.read.vehicle.virtual_energy(index) if max_e else None
-            # Fallback to minfo dataset if reader API missing
-            if max_e and ve is not None:
-                pct_e = max(0.0, min(1.0, ve / max_e))
-                pct_e_int = int(pct_e * 1000)
-                self.bar_energy.setValue(pct_e_int)
-                self.label_energy.setText(f"Energy: <b>{pct_e:.1%}</b>")
-                if pct_e > 0.4:
-                    color = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #2980b9, stop:1 #3498db)"
-                elif pct_e > 0.15:
-                    color = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #d35400, stop:1 #f39c12)"
-                else:
-                    color = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #c0392b, stop:1 #e74c3c)"
-                self.bar_energy.setStyleSheet(
-                    "QProgressBar { background: #333; border: 1px solid #555; border-radius: 4px; }"
-                    f"QProgressBar::chunk {{ background: {color}; border-radius: 3px; }}"
-                )
+            # Use centralized reader to get fraction 0..1 so list and bar match
+            pct_e = BroadcastList._read_ve_fraction(index)
+            if pct_e is None:
+                self.bar_energy.setValue(0)
+                self.label_energy.setText("Energy: <b>N/A</b>")
+                return
+            pct_e = max(0.0, min(1.0, pct_e))
+            pct_e_int = int(pct_e * 1000)
+            self.bar_energy.setValue(pct_e_int)
+            self.label_energy.setText(f"Energy: <b>{pct_e:.1%}</b>")
+            if pct_e > 0.4:
+                color = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #2980b9, stop:1 #3498db)"
+            elif pct_e > 0.15:
+                color = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #d35400, stop:1 #f39c12)"
             else:
-                # Try legacy minfo dataset
-                try:
-                    veh_data = minfo.vehicles.dataSet[index]
-                    ve_remaining = veh_data.energyRemaining
-                    if ve_remaining > -1.0 and veh_data.driverName:
-                        pct_e = max(0.0, min(1.0, ve_remaining))
-                        pct_e_int = int(pct_e * 1000)
-                        self.bar_energy.setValue(pct_e_int)
-                        self.label_energy.setText(f"Energy: <b>{pct_e:.1%}</b>")
-                        if pct_e > 0.4:
-                            color = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #2980b9, stop:1 #3498db)"
-                        elif pct_e > 0.15:
-                            color = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #d35400, stop:1 #f39c12)"
-                        else:
-                            color = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #c0392b, stop:1 #e74c3c)"
-                        self.bar_energy.setStyleSheet(
-                            "QProgressBar { background: #333; border: 1px solid #555; border-radius: 4px; }"
-                            f"QProgressBar::chunk {{ background: {color}; border-radius: 3px; }}"
-                        )
-                    else:
-                        self.bar_energy.setValue(0)
-                        self.label_energy.setText("Energy: <b>N/A</b>")
-                except (AttributeError, IndexError):
-                    self.bar_energy.setValue(0)
-                    self.label_energy.setText("Energy: <b>N/A</b>")
+                color = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #c0392b, stop:1 #e74c3c)"
+            self.bar_energy.setStyleSheet(
+                "QProgressBar { background: #333; border: 1px solid #555; border-radius: 4px; }"
+                f"QProgressBar::chunk {{ background: {color}; border-radius: 3px; }}"
+            )
         except (AttributeError, IndexError):
             pass
 
