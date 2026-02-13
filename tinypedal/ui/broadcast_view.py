@@ -80,7 +80,8 @@ class BroadcastList(QWidget):
         self.last_enabled = None
         self._sort_mode = SORT_STANDINGS
         self._yellow_timestamps = {}  # driver_index -> last time yellow was active
-        self._top_speeds = {}  # driver_index -> max speed in m/s
+        # map vehicle slot_id -> max speed in m/s to remain stable across class/order changes
+        self._top_speeds = {}  # slot_id -> max speed in m/s
         # Timestamp of last explicit user selection (click/double-click)
         self._last_user_action = 0.0
 
@@ -106,7 +107,7 @@ class BroadcastList(QWidget):
         except Exception:
             pass
         # Columns: Name, VE, Status, Top Spd, Best, Vehicle Integrity
-        headers = ["Name", "VE", "Status", "Top Spd", "Best", "Vehicle Integrity"]
+        headers = ["Name", "Virtual Energy", "Vehicle Status", "Top Speed", "Best Laptime", "Vehicle Integrity"]
         self.listbox_spectate.setColumnCount(len(headers))
         self.listbox_spectate.setHorizontalHeaderLabels(headers)
         # Auto-scale columns to fill available space
@@ -144,6 +145,9 @@ class BroadcastList(QWidget):
         self.button_refresh = QPushButton("Refresh")
         self.button_refresh.clicked.connect(self.refresh)
 
+        self.button_reset = QPushButton("Reset")
+        self.button_reset.clicked.connect(self.reset_caches)
+
         self.button_toggle = QPushButton("")
         self.button_toggle.setCheckable(True)
         self.button_toggle.toggled.connect(self.toggle_spectate)
@@ -155,6 +159,7 @@ class BroadcastList(QWidget):
         layout_button.addWidget(self.button_spectate)
         layout_button.addWidget(self.button_focus)
         layout_button.addWidget(self.button_refresh)
+        layout_button.addWidget(self.button_reset)
         layout_button.addWidget(self.button_sort)
         layout_button.addStretch(1)
         layout_button.addWidget(self.button_toggle)
@@ -413,6 +418,29 @@ class BroadcastList(QWidget):
         self._populate_table(listbox, driver_list, class_positions, battles, close, laptime_est, force=False)
         self.focus_on_selected(selected_driver_name)
 
+    def reset_caches(self):
+        """Clear stored caches (top speeds, yellow timestamps, mappings) and refresh UI."""
+        try:
+            self._top_speeds.clear()
+        except Exception:
+            pass
+        try:
+            self._yellow_timestamps.clear()
+        except Exception:
+            pass
+        try:
+            self._slot_row.clear()
+        except Exception:
+            pass
+        # force a full refresh of the page
+        try:
+            self._refresh_list_only()
+        except Exception:
+            try:
+                self.refresh()
+            except Exception:
+                pass
+
     def _update_speeds(self):
         """Poll current speeds for all vehicles and update cached top speeds."""
         # Only track while broadcast mode enabled
@@ -425,17 +453,21 @@ class BroadcastList(QWidget):
         updated = False
         for idx in range(total):
             try:
+                slot = api.read.vehicle.slot_id(idx)
+            except Exception:
+                slot = None
+            try:
                 sp = api.read.vehicle.speed(idx)
-                if sp is None:
+                if sp is None or slot is None:
                     continue
-                # record max speed seen
-                prev = self._top_speeds.get(idx, 0.0)
+                # record max speed seen per vehicle slot id (stable across ordering)
+                prev = self._top_speeds.get(slot, 0.0)
                 try:
                     spf = float(sp)
                 except Exception:
                     continue
                 if spf > prev:
-                    self._top_speeds[idx] = spf
+                    self._top_speeds[slot] = spf
                     updated = True
             except (AttributeError, IndexError):
                 continue
@@ -526,7 +558,12 @@ class BroadcastList(QWidget):
                 table.setItem(row, 2, status_item)
 
                 # Top speed (from cache) - center
-                top_speed_kph = int(self._top_speeds.get(_index, 0.0) * 3.6)
+                # Try to read top speed by stable slot id if available, fallback to index
+                try:
+                    slot = api.read.vehicle.slot_id(_index)
+                except Exception:
+                    slot = None
+                top_speed_kph = int(self._top_speeds.get(slot, self._top_speeds.get(_index, 0.0)) * 3.6)
                 top_item = QTableWidgetItem(f"{top_speed_kph} km/h")
                 top_item.setTextAlignment(Qt.AlignCenter)
                 top_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
