@@ -39,6 +39,7 @@ from PySide2.QtWidgets import (
     QWidget,
     QHeaderView,
     QSizePolicy,
+    QAbstractItemView,
 )
 
 from .. import app_signal
@@ -68,6 +69,7 @@ COLOR_PENALTY = QColor(220, 30, 30)  # red
 COLOR_PIT = QColor(150, 150, 150)  # grey
 VE_STR_WIDTH = 16
 STATUS_GAP = 6
+USER_SELECTION_COOLDOWN = 2.0  # seconds to avoid clobbering user selection after interaction
 
 
 class BroadcastList(QWidget):
@@ -79,6 +81,8 @@ class BroadcastList(QWidget):
         self._sort_mode = SORT_STANDINGS
         self._yellow_timestamps = {}  # driver_index -> last time yellow was active
         self._top_speeds = {}  # driver_index -> max speed in m/s
+        # Timestamp of last explicit user selection (click/double-click)
+        self._last_user_action = 0.0
 
         # Label
         self.label_spectating = QLabel("")
@@ -101,15 +105,27 @@ class BroadcastList(QWidget):
             self.listbox_spectate.setGridStyle(Qt.SolidLine)
         except Exception:
             pass
-        # Columns: Name, VE, Status, Top Spd, Best
-        headers = ["Name", "VE", "Status", "Top Spd", "Best"]
+        # Columns: Name, VE, Status, Top Spd, Best, Vehicle Integrity
+        headers = ["Name", "VE", "Status", "Top Spd", "Best", "Vehicle Integrity"]
         self.listbox_spectate.setColumnCount(len(headers))
         self.listbox_spectate.setHorizontalHeaderLabels(headers)
         # Auto-scale columns to fill available space
         self.listbox_spectate.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         # Allow the table to expand to fill available layout space
         self.listbox_spectate.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.listbox_spectate.cellDoubleClicked.connect(lambda r, c: self.spectate_selected())
+        # Timer to track live top speeds for all vehicles
+        self._speed_timer = QTimer(self)
+        self._speed_timer.timeout.connect(self._update_speeds)
+        # default to 200ms polling for speed updates
+        self._speed_timer.setInterval(200)
+        # make table read-only and ensure double-click always triggers spectate
+        self.listbox_spectate.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.listbox_spectate.cellDoubleClicked.connect(lambda r, c: self._on_row_double_clicked(r, c))
+        # track user's clicks so auto-refresh won't override selection immediately after interaction
+        try:
+            self.listbox_spectate.cellClicked.connect(lambda r, c: setattr(self, '_last_user_action', monotonic()))
+        except Exception:
+            pass
         # hide the vertical row headers (remove visible row lines on the left)
         try:
             self.listbox_spectate.verticalHeader().setVisible(False)
@@ -143,151 +159,22 @@ class BroadcastList(QWidget):
         layout_button.addStretch(1)
         layout_button.addWidget(self.button_toggle)
 
-        # Timing info panel (compact)
-        self.timing_group = QGroupBox("Live Timing")
-        small_font = QFont()
-        small_font.setPointSize(8)
-        self.timing_group.setFont(small_font)
-        timing_grid = QGridLayout()
-        timing_grid.setSpacing(1)
-        timing_grid.setContentsMargins(4, 4, 4, 4)
+        # Live timing and damage UI removed - driver list only
 
-        # Row 0: Current lap / Laps
-        self.label_current_lap = QLabel("--")
-        self.label_laps = QLabel("--")
-        timing_grid.addWidget(QLabel("Current"), 0, 0)
-        timing_grid.addWidget(self.label_current_lap, 0, 1)
-        timing_grid.addWidget(QLabel("Laps"), 0, 2)
-        timing_grid.addWidget(self.label_laps, 0, 3)
+        # Damage panel removed - no bottom panels
 
-        # Row 1: Best / Last
-        self.label_best_lap = QLabel("--")
-        self.label_last_lap = QLabel("--")
-        timing_grid.addWidget(QLabel("Best"), 1, 0)
-        timing_grid.addWidget(self.label_best_lap, 1, 1)
-        timing_grid.addWidget(QLabel("Last"), 1, 2)
-        timing_grid.addWidget(self.label_last_lap, 1, 3)
+        # Virtual energy bar removed from bottom panel
 
-        # Row 2: Sectors
-        self.label_sector1 = QLabel("--")
-        self.label_sector2 = QLabel("--")
-        self.label_sector3 = QLabel("--")
-        timing_grid.addWidget(QLabel("S1"), 2, 0)
-        timing_grid.addWidget(self.label_sector1, 2, 1)
-        timing_grid.addWidget(QLabel("S2"), 2, 2)
-        timing_grid.addWidget(self.label_sector2, 2, 3)
-        timing_grid.addWidget(QLabel("S3"), 2, 4)
-        timing_grid.addWidget(self.label_sector3, 2, 5)
-
-        # Row 3: Best sectors
-        self.label_best_s1 = QLabel("--")
-        self.label_best_s2 = QLabel("--")
-        self.label_best_s3 = QLabel("--")
-        timing_grid.addWidget(QLabel("BS1"), 3, 0)
-        timing_grid.addWidget(self.label_best_s1, 3, 1)
-        timing_grid.addWidget(QLabel("BS2"), 3, 2)
-        timing_grid.addWidget(self.label_best_s2, 3, 3)
-        timing_grid.addWidget(QLabel("BS3"), 3, 4)
-        timing_grid.addWidget(self.label_best_s3, 3, 5)
-
-        # Row 4: Gaps
-        self.label_gap_leader = QLabel("--")
-        self.label_gap_next = QLabel("--")
-        timing_grid.addWidget(QLabel("Leader"), 4, 0)
-        timing_grid.addWidget(self.label_gap_leader, 4, 1)
-        timing_grid.addWidget(QLabel("Next"), 4, 2)
-        timing_grid.addWidget(self.label_gap_next, 4, 3)
-
-        # Row 5: Speed / Top Speed
-        self.label_speed = QLabel("--")
-        self.label_top_speed = QLabel("--")
-        timing_grid.addWidget(QLabel("Speed"), 5, 0)
-        timing_grid.addWidget(self.label_speed, 5, 1)
-        timing_grid.addWidget(QLabel("Top"), 5, 2)
-        timing_grid.addWidget(self.label_top_speed, 5, 3)
-
-        # Row 6: Penalty
-        self.label_penalty = QLabel("--")
-        timing_grid.addWidget(QLabel("Penalty"), 6, 0)
-        timing_grid.addWidget(self.label_penalty, 6, 1, 1, 3)
-
-        self.timing_group.setLayout(timing_grid)
-
-        # Damage info panel (compact)
-        self.damage_group = QGroupBox("Damage")
-        self.damage_group.setFont(small_font)
-        damage_layout = QVBoxLayout()
-        damage_layout.setSpacing(1)
-        damage_layout.setContentsMargins(4, 4, 4, 4)
-
-        self.label_integrity = QLabel("Integrity: --")
-        self.bar_integrity = QProgressBar()
-        self.bar_integrity.setRange(0, 100)
-        self.bar_integrity.setValue(100)
-        self.bar_integrity.setTextVisible(False)
-        self.bar_integrity.setFixedHeight(6)
-        self.bar_integrity.setStyleSheet(
-            "QProgressBar { background: #444; border: none; border-radius: 3px; }"
-            "QProgressBar::chunk { background: #2ecc71; border-radius: 3px; }"
-        )
-
-        self.label_body = QLabel("Body: OK")
-        self.label_aero = QLabel("Aero: OK")
-        self.label_susp = QLabel("Susp: OK")
-        self.label_detached = QLabel("")
-
-        damage_layout.addWidget(self.label_integrity)
-        damage_layout.addWidget(self.bar_integrity)
-        # Body, aero and suspension labels are temporarily removed from the UI
-        # to keep the panel compact while logic remains intact.
-        damage_layout.addWidget(self.label_detached)
-        damage_layout.addStretch(1)
-        self.damage_group.setLayout(damage_layout)
-
-        # Virtual energy bar (compact)
-        self.energy_group = QGroupBox("Virtual Energy")
-        self.energy_group.setFont(small_font)
-        energy_layout = QVBoxLayout()
-        energy_layout.setSpacing(2)
-        energy_layout.setContentsMargins(4, 4, 4, 4)
-
-        self.label_energy = QLabel("Energy: --")
-        self.bar_energy = QProgressBar()
-        self.bar_energy.setRange(0, 1000)
-        self.bar_energy.setValue(0)
-        self.bar_energy.setTextVisible(False)
-        self.bar_energy.setFixedHeight(14)
-        self.bar_energy.setStyleSheet(
-            "QProgressBar { background: #333; border: 1px solid #555; border-radius: 4px; }"
-            "QProgressBar::chunk { background: qlineargradient("
-            "x1:0, y1:0, x2:1, y2:0, stop:0 #2980b9, stop:1 #3498db); border-radius: 3px; }"
-        )
-
-        energy_layout.addWidget(self.label_energy)
-        energy_layout.addWidget(self.bar_energy)
-        self.energy_group.setLayout(energy_layout)
-
-        # Bottom panel: timing left, damage right
-        bottom_layout = QHBoxLayout()
-        bottom_layout.addWidget(self.timing_group, 3)
-        bottom_layout.addWidget(self.damage_group, 1)
-
-        # Layout
+        # Layout (driver list only)
         layout_main = QVBoxLayout()
         layout_main.addWidget(self.label_spectating)
         layout_main.addWidget(self.listbox_spectate, 1)  # stretch priority
         layout_main.addLayout(layout_button)
-        layout_main.addLayout(bottom_layout)
-        layout_main.addWidget(self.energy_group)
         margin = UIScaler.pixel(6)
         layout_main.setContentsMargins(margin, margin, margin, margin)
         self.setLayout(layout_main)
 
-        # Live timing update timer
-        self._timing_timer = QTimer(self)
-        self._timing_timer.timeout.connect(self._update_timing)
-        self._timing_timer.setInterval(100)
-        self._list_update_counter = 0
+        # Live timing removed; driver list only
 
     @Slot(bool)  # type: ignore[operator]
     def refresh(self):
@@ -313,35 +200,53 @@ class BroadcastList(QWidget):
         """Set enable state"""
         self.button_toggle.setChecked(enabled)
         self.button_toggle.setText("Enabled" if enabled else "Disabled")
+        # enable/disable primary controls
         self.listbox_spectate.setDisabled(not enabled)
         self.button_spectate.setDisabled(not enabled)
         self.button_focus.setDisabled(not enabled)
         self.button_refresh.setDisabled(not enabled)
         self.button_sort.setDisabled(not enabled)
         self.label_spectating.setDisabled(not enabled)
-        self.timing_group.setDisabled(not enabled)
-        self.damage_group.setDisabled(not enabled)
-        self.energy_group.setDisabled(not enabled)
         if enabled:
             logger.info("ENABLED: broadcast mode")
-            self._list_update_counter = 9  # first auto-refresh on next tick
-            self._timing_timer.start()
-            self.refresh()  # force immediate list build
+            # trigger an immediate refresh of the driver list
+            self._list_update_counter = 9
+            # start live speed tracking
+            try:
+                self._speed_timer.start()
+            except Exception:
+                pass
+            self.refresh()
         else:
             logger.info("DISABLED: broadcast mode")
-            self._timing_timer.stop()
-            self._reset_timing()
+            # when disabled just clear the list
+            try:
+                self.listbox_spectate.setRowCount(0)
+            except Exception:
+                self.listbox_spectate.clear()
+            # stop live speed tracking and clear cache
+            try:
+                self._speed_timer.stop()
+            except Exception:
+                pass
+            self._top_speeds.clear()
 
     def toggle_spectate(self, checked: bool):
         """Toggle spectate mode"""
         cfg.api["enable_player_index_override"] = checked
         cfg.save()
         api.setup()
-        app_signal.refresh.emit(True)
+        app_signal.refresh.emit(False)
 
     def spectate_selected(self):
         """Spectate selected player"""
-        self.update_drivers(self.selected_name(), -1, True)
+        # record that user initiated a selection so auto-refresh pauses selection changes
+        try:
+            self._last_user_action = monotonic()
+        except Exception:
+            pass
+        # Force save/update when user explicitly spectates
+        self.update_drivers(self.selected_name(), -1, True, force_save=True)
         self.focus_camera()
 
     def focus_camera(self):
@@ -358,7 +263,25 @@ class BroadcastList(QWidget):
         except (AttributeError, IndexError):
             pass
 
-    def update_drivers(self, selected_driver_name: str, selected_index: int, match_name: bool):
+    def _on_row_double_clicked(self, row: int, column: int):
+        """Handle double click anywhere on a row: select driver and focus camera."""
+        try:
+            it = self.listbox_spectate.item(row, 0)
+            if it is None:
+                return
+            driver_name = it.data(Qt.UserRole) or it.text()
+            # mark user action to prevent auto-refresh clobbering
+            try:
+                self._last_user_action = monotonic()
+            except Exception:
+                pass
+            # spectate by name and focus camera; force save so camera focus works
+            self.update_drivers(driver_name, -1, True, force_save=True)
+            self.focus_camera()
+        except Exception:
+            pass
+
+    def update_drivers(self, selected_driver_name: str, selected_index: int, match_name: bool, force_save: bool = False):
         """Update drivers list"""
         listbox = self.listbox_spectate
         driver_list = []
@@ -397,26 +320,42 @@ class BroadcastList(QWidget):
         class_positions = self._calc_class_positions(driver_list)
         battles, close = self._find_battles(driver_list, laptime_est)
 
-        self._populate_table(listbox, driver_list, class_positions, battles, close, laptime_est)
-        self.focus_on_selected(selected_driver_name)
-        self.save_selected_index(selected_index)
+        # If the user has interacted recently, avoid forcing selection changes
+        try:
+            recent = monotonic() - getattr(self, '_last_user_action', 0.0) < USER_SELECTION_COOLDOWN
+        except Exception:
+            recent = False
+
+        # Populate table; don't force override if recent user action
+        self._populate_table(listbox, driver_list, class_positions, battles, close, laptime_est, force=not recent)
+
+        # Only change UI selection and saved index when not recently interacted by user
+        # or when explicitly forced by user action (force_save)
+        if not recent or force_save:
+            self.focus_on_selected(selected_driver_name)
+            self.save_selected_index(selected_index)
 
     def focus_on_selected(self, driver_name: str):
         """Focus on selected driver row"""
         listbox = self.listbox_spectate
-        # For table, find the row with matching UserRole and select it
+        # Do not override a recent user selection
+        try:
+            if monotonic() - getattr(self, '_last_user_action', 0.0) < USER_SELECTION_COOLDOWN:
+                return
+        except Exception:
+            pass
+        # For table, find the row with matching UserRole and select it if present
         row_index = None
         for r in range(self.listbox_spectate.rowCount()):
             it = self.listbox_spectate.item(r, 0)
             if it and it.data(Qt.UserRole) == driver_name:
                 row_index = r
                 break
-        if row_index is None:
-            row_index = 0
-        try:
-            self.listbox_spectate.selectRow(row_index)
-        except Exception:
-            pass
+        if row_index is not None:
+            try:
+                self.listbox_spectate.selectRow(row_index)
+            except Exception:
+                pass
         # Make sure selected name valid
         self.label_spectating.setText(f"Spectating: <b>{self.selected_name()}</b>")
 
@@ -470,12 +409,52 @@ class BroadcastList(QWidget):
         class_positions = self._calc_class_positions(driver_list)
         battles, close = self._find_battles(driver_list, laptime_est)
 
-        # Populate using table implementation
-        self._populate_table(listbox, driver_list, class_positions, battles, close, laptime_est)
+        # Populate using table implementation (auto-refresh should not override recent user selection)
+        self._populate_table(listbox, driver_list, class_positions, battles, close, laptime_est, force=False)
         self.focus_on_selected(selected_driver_name)
 
-    def _populate_table(self, table, driver_list, class_positions, battles, close, laptime_est):
+    def _update_speeds(self):
+        """Poll current speeds for all vehicles and update cached top speeds."""
+        # Only track while broadcast mode enabled
+        if not cfg.api.get("enable_player_index_override", False):
+            return
+        try:
+            total = api.read.vehicle.total_vehicles()
+        except Exception:
+            return
+        updated = False
+        for idx in range(total):
+            try:
+                sp = api.read.vehicle.speed(idx)
+                if sp is None:
+                    continue
+                # record max speed seen
+                prev = self._top_speeds.get(idx, 0.0)
+                try:
+                    spf = float(sp)
+                except Exception:
+                    continue
+                if spf > prev:
+                    self._top_speeds[idx] = spf
+                    updated = True
+            except (AttributeError, IndexError):
+                continue
+        # If any top speeds changed, refresh the visible list so column updates
+        if updated:
+            try:
+                self._refresh_list_only()
+            except Exception:
+                pass
+
+    def _populate_table(self, table, driver_list, class_positions, battles, close, laptime_est, force: bool = True):
         """Populate QTableWidget with drivers grouped by class."""
+        # If not forced and the user recently interacted, skip repopulating the table
+        if not force:
+            try:
+                if monotonic() - getattr(self, '_last_user_action', 0.0) < USER_SELECTION_COOLDOWN:
+                    return
+            except Exception:
+                pass
         # Clear existing rows but keep headers
         table.setRowCount(0)
 
@@ -530,22 +509,27 @@ class BroadcastList(QWidget):
                 name_item = QTableWidgetItem(f"P{class_pos:<2d} {name}")
                 name_item.setData(Qt.UserRole, name)
                 name_item.setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+                # make cell selectable but not editable
+                name_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                 table.setItem(row, 0, name_item)
 
                 # VE: show percentage only (simple text) to avoid widget issues
                 ve_item = QTableWidgetItem(ve_str)
                 ve_item.setTextAlignment(Qt.AlignCenter)
+                ve_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                 table.setItem(row, 1, ve_item)
 
                 # Status - center
                 status_item = QTableWidgetItem(status_text)
                 status_item.setTextAlignment(Qt.AlignCenter)
+                status_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                 table.setItem(row, 2, status_item)
 
                 # Top speed (from cache) - center
                 top_speed_kph = int(self._top_speeds.get(_index, 0.0) * 3.6)
                 top_item = QTableWidgetItem(f"{top_speed_kph} km/h")
                 top_item.setTextAlignment(Qt.AlignCenter)
+                top_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                 table.setItem(row, 3, top_item)
 
                 # Best lap - center
@@ -555,7 +539,19 @@ class BroadcastList(QWidget):
                     best_lap = 0.0
                 best_item = QTableWidgetItem(self._format_time(best_lap))
                 best_item.setTextAlignment(Qt.AlignCenter)
+                best_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                 table.setItem(row, 4, best_item)
+
+                # Vehicle integrity column (percentage) - center
+                try:
+                    integrity = api.read.vehicle.integrity(_index)
+                    integrity_pct = int(max(0.0, min(1.0, float(integrity))) * 100)
+                except Exception:
+                    integrity_pct = 0
+                integrity_item = QTableWidgetItem(f"{integrity_pct}%")
+                integrity_item.setTextAlignment(Qt.AlignCenter)
+                integrity_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                table.setItem(row, 5, integrity_item)
 
                 # Color row based on status
                 if penalty_tag:
@@ -576,6 +572,13 @@ class BroadcastList(QWidget):
                 elif not is_lapping and _index in close:
                     for c in range(table.columnCount()):
                         table.item(row, c).setForeground(COLOR_CLOSE)
+                # ensure integrity column inherits same color when set
+                try:
+                    if table.item(row, 5) is not None:
+                        # color already applied above in the loop
+                        pass
+                except Exception:
+                    pass
 
     @staticmethod
     def save_selected_index(index: int):
