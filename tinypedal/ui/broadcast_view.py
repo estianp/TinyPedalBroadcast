@@ -82,6 +82,9 @@ class BroadcastList(QWidget):
         self._yellow_timestamps = {}  # driver_index -> last time yellow was active
         # map vehicle slot_id -> max speed in m/s to remain stable across class/order changes
         self._top_speeds = {}  # slot_id -> max speed in m/s
+        # Track last seen best lap value and the lap number when it was set
+        self._last_best_lap = {}  # driver_index -> best_lap_seconds
+        self._best_lap_number = {}  # driver_index -> lap_number
         # Timestamp of last explicit user selection (click/double-click)
         self._last_user_action = 0.0
 
@@ -106,8 +109,16 @@ class BroadcastList(QWidget):
             self.listbox_spectate.setGridStyle(Qt.SolidLine)
         except Exception:
             pass
-        # Columns: Name, VE, Status, Top Spd, Best, Vehicle Integrity
-        headers = ["Name", "Virtual Energy", "Vehicle Status", "Top Speed", "Best Laptime", "Vehicle Integrity"]
+        # Columns: Name, VE, Status, Top Spd, Best, Avg Laptime, Vehicle Integrity
+        headers = [
+            "Name",
+            "Virtual Energy",
+            "Vehicle Status",
+            "Top Speed",
+            "Best Laptime",
+            "Last Laptime",
+            "Vehicle Integrity",
+        ]
         self.listbox_spectate.setColumnCount(len(headers))
         self.listbox_spectate.setHorizontalHeaderLabels(headers)
         # Auto-scale columns to fill available space
@@ -521,7 +532,15 @@ class BroadcastList(QWidget):
                 row = table.rowCount()
                 table.insertRow(row)
                 class_pos = class_positions.get(_index, place)
-                ve_str = self._format_ve(_index)
+                # Safely compute VE display: read fraction and format as percent only
+                try:
+                    pct_f = self._read_ve_fraction(_index, allow_global=False)
+                except Exception:
+                    pct_f = None
+                if isinstance(pct_f, (int, float)) and pct_f is not None and pct_f > 0.0:
+                    ve_str = f"{int(max(0.0, min(1.0, float(pct_f))) * 100):3d}%"
+                else:
+                    ve_str = ""
                 penalty_tag = self._get_penalty_tag(_index)
                 is_lapping = _index in lapping
                 tags = []
@@ -545,16 +564,56 @@ class BroadcastList(QWidget):
                 name_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                 table.setItem(row, 0, name_item)
 
+                # Car name (next to driver name)
+                # Prefer vehicle name from module info (vehicle dataset) which is the actual car
+                # Fallback to reader API when not available
+                car_name = ""
+                try:
+                    try:
+                        veh = minfo.vehicles.dataSet[_index]
+                        car_name = getattr(veh, "vehicleName", "") or car_name
+                    except Exception:
+                        pass
+                    if not car_name:
+                        try:
+                            car_name = api.read.vehicle.vehicle_name(_index) or ""
+                        except Exception:
+                            car_name = ""
+                # Do not map vehicle name to brand/team here; show raw vehicle name
+                except Exception:
+                    car_name = ""
                 # VE: show percentage only (simple text) to avoid widget issues
                 ve_item = QTableWidgetItem(ve_str)
                 ve_item.setTextAlignment(Qt.AlignCenter)
                 ve_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                 table.setItem(row, 1, ve_item)
-
                 # Status - center
                 status_item = QTableWidgetItem(status_text)
                 status_item.setTextAlignment(Qt.AlignCenter)
                 status_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+
+                # Determine text color for status and driver name (keep rest unchanged)
+                try:
+                    clr = None
+                    if penalty_tag:
+                        clr = COLOR_PENALTY
+                    elif is_yellow:
+                        clr = COLOR_YELLOW
+                    elif is_blue:
+                        clr = COLOR_BLUE
+                    elif in_pits:
+                        clr = COLOR_PIT
+                    elif not is_lapping and _index in battles:
+                        clr = COLOR_BATTLE
+                    elif not is_lapping and _index in close:
+                        clr = COLOR_CLOSE
+                    if clr is not None:
+                        # apply matching text color to driver name and status cell
+                        name_item.setForeground(clr)
+                        status_item.setForeground(clr)
+                except Exception:
+                    pass
+
                 table.setItem(row, 2, status_item)
 
                 # Top speed (from cache) - center
@@ -574,10 +633,46 @@ class BroadcastList(QWidget):
                     best_lap = api.read.timing.best_laptime(_index)
                 except Exception:
                     best_lap = 0.0
-                best_item = QTableWidgetItem(self._format_time(best_lap))
+                # Detect new best lap and record lap number when it occurs
+                try:
+                    prev_best = self._last_best_lap.get(_index)
+                    if best_lap and best_lap > 0:
+                        # If best changed from previous, assume new best just recorded
+                        if prev_best is None or abs(best_lap - prev_best) > 1e-6:
+                            # Use completed_laps as the lap number for the new best
+                            try:
+                                lap_num = api.read.lap.completed_laps(_index)
+                            except Exception:
+                                lap_num = None
+                            if lap_num is not None:
+                                self._best_lap_number[_index] = lap_num
+                            self._last_best_lap[_index] = best_lap
+                    else:
+                        # No valid best; clear stored
+                        self._last_best_lap.pop(_index, None)
+                        self._best_lap_number.pop(_index, None)
+                except Exception:
+                    pass
+                # Format display including lap number if known
+                best_display = self._format_time(best_lap)
+                lapnum = self._best_lap_number.get(_index)
+                if lapnum:
+                    best_display = f"{best_display} ({lapnum})"
+                best_item = QTableWidgetItem(best_display)
                 best_item.setTextAlignment(Qt.AlignCenter)
                 best_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                 table.setItem(row, 4, best_item)
+
+                # Last lap time for this driver
+                try:
+                    last_lap = api.read.timing.last_laptime(_index)
+                except Exception:
+                    last_lap = 0.0
+                last_display = self._format_time(last_lap)
+                last_item = QTableWidgetItem(last_display)
+                last_item.setTextAlignment(Qt.AlignCenter)
+                last_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                table.setItem(row, 5, last_item)
 
                 # Vehicle integrity column (percentage) - center
                 try:
@@ -588,34 +683,15 @@ class BroadcastList(QWidget):
                 integrity_item = QTableWidgetItem(f"{integrity_pct}%")
                 integrity_item.setTextAlignment(Qt.AlignCenter)
                 integrity_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-                table.setItem(row, 5, integrity_item)
+                table.setItem(row, 6, integrity_item)
 
-                # Color row based on status
-                if penalty_tag:
-                    for c in range(table.columnCount()):
-                        table.item(row, c).setForeground(COLOR_PENALTY)
-                elif is_yellow:
-                    for c in range(table.columnCount()):
-                        table.item(row, c).setForeground(COLOR_YELLOW)
-                elif is_blue:
-                    for c in range(table.columnCount()):
-                        table.item(row, c).setForeground(COLOR_BLUE)
-                elif in_pits:
-                    for c in range(table.columnCount()):
-                        table.item(row, c).setForeground(COLOR_PIT)
-                elif not is_lapping and _index in battles:
-                    for c in range(table.columnCount()):
-                        table.item(row, c).setForeground(COLOR_BATTLE)
-                elif not is_lapping and _index in close:
-                    for c in range(table.columnCount()):
-                        table.item(row, c).setForeground(COLOR_CLOSE)
-                # ensure integrity column inherits same color when set
-                try:
-                    if table.item(row, 5) is not None:
-                        # color already applied above in the loop
-                        pass
-                except Exception:
-                    pass
+                # no additional coloring here; text color already applied to name and status
+
+        # ensure table repaints so background changes take effect
+        try:
+            table.viewport().update()
+        except Exception:
+            pass
 
     @staticmethod
     def save_selected_index(index: int):
@@ -885,6 +961,28 @@ class BroadcastList(QWidget):
         except (AttributeError, IndexError):
             return "               "
 
+    def _get_stint_average(self, driver_index: int) -> float | None:
+        """Compute average lap time for current stint for a driver.
+
+        Uses available module info: try per-vehicle delta stint time if present
+        or fall back to minfo.history consumption data set if it encodes lap times.
+        """
+        try:
+            # Prefer per-vehicle lap history (DeltaLapTime stored in minfo.vehicles.dataSet[].lapTimeHistory)
+            try:
+                veh = minfo.vehicles.dataSet[driver_index]
+                lph = getattr(veh, "lapTimeHistory", None)
+                if lph:
+                    # DeltaLapTime stores recent lap times in indices 0..4
+                    vals = [float(x) for x in list(lph)[:5] if x > 0 and x < MAX_SECONDS]
+                    if vals:
+                        return sum(vals) / len(vals)
+            except Exception:
+                pass
+        except (AttributeError, IndexError):
+            return None
+        return None
+
     @staticmethod
     def _get_penalty_tag(driver_index: int) -> str:
         """Get penalty tag for driver (DT, SG, etc)
@@ -1001,7 +1099,28 @@ class BroadcastList(QWidget):
             # Best & last lap
             best = api.read.timing.best_laptime(index)
             last = api.read.timing.last_laptime(index)
-            self.label_best_lap.setText(f"<b>{self._format_time(best)}</b>")
+            # Detect new best lap and record lap number
+            try:
+                prev_best = self._last_best_lap.get(index)
+                if best and best > 0:
+                    if prev_best is None or abs(best - prev_best) > 1e-6:
+                        try:
+                            lap_num = api.read.lap.completed_laps(index)
+                        except Exception:
+                            lap_num = None
+                        if lap_num is not None:
+                            self._best_lap_number[index] = lap_num
+                        self._last_best_lap[index] = best
+                else:
+                    self._last_best_lap.pop(index, None)
+                    self._best_lap_number.pop(index, None)
+            except Exception:
+                pass
+            best_disp = self._format_time(best)
+            lapnum = self._best_lap_number.get(index)
+            if lapnum:
+                best_disp = f"{best_disp} ({lapnum})"
+            self.label_best_lap.setText(f"<b>{best_disp}</b>")
             self.label_last_lap.setText(f"<b>{self._format_time(last)}</b>")
 
             # Current sectors
