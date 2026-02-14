@@ -147,12 +147,6 @@ class BroadcastList(QWidget):
             pass
 
         # Button
-        self.button_spectate = QPushButton("Spectate")
-        self.button_spectate.clicked.connect(self.spectate_selected)
-
-        self.button_focus = QPushButton("Focus Camera")
-        self.button_focus.clicked.connect(self.focus_camera)
-
         self.button_refresh = QPushButton("Refresh")
         self.button_refresh.clicked.connect(self.refresh)
 
@@ -167,11 +161,8 @@ class BroadcastList(QWidget):
         self.button_sort.clicked.connect(self._toggle_sort_mode)
 
         layout_button = QHBoxLayout()
-        layout_button.addWidget(self.button_spectate)
-        layout_button.addWidget(self.button_focus)
         layout_button.addWidget(self.button_refresh)
         layout_button.addWidget(self.button_reset)
-        layout_button.addWidget(self.button_sort)
         layout_button.addStretch(1)
         layout_button.addWidget(self.button_toggle)
 
