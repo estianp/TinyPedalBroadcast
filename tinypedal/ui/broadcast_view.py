@@ -24,7 +24,7 @@ import logging
 from time import monotonic
 
 from PySide2.QtCore import Qt, Slot, QTimer
-from PySide2.QtGui import QColor, QFont
+from PySide2.QtGui import QColor, QFont, QPalette
 from PySide2.QtWidgets import (
     QGridLayout,
     QGroupBox,
@@ -56,20 +56,22 @@ logger = logging.getLogger(__name__)
 SORT_STANDINGS = 0
 SORT_RELATIVE = 1
 SORT_LABELS = ("Standings", "Relative")
-BATTLE_THRESHOLD = 1.0  # seconds
-CLOSE_THRESHOLD = 2.0  # seconds
+BATTLE_THRESHOLD = 0.7  # seconds
+CLOSE_THRESHOLD = 1.5  # seconds
 LAPPING_THRESHOLD = 3.0  # seconds proximity to blue-flagged car
 YELLOW_SPEED_THRESHOLD = 8  # m/s
-YELLOW_STICKY_DURATION = 5.0  # seconds to keep yellow highlight after clearing
+YELLOW_STICKY_DURATION = 3.5  # seconds to keep yellow highlight after clearing
 COLOR_BATTLE = QColor(34, 139, 34)  # green
 COLOR_CLOSE = QColor(255, 140, 0)  # orange
 COLOR_YELLOW = QColor(255, 255, 0)  # yellow
 COLOR_BLUE = QColor(0, 160, 255)  # blue
 COLOR_PENALTY = QColor(220, 30, 30)  # red
 COLOR_PIT = QColor(150, 150, 150)  # grey
+COLOR_HIGHLIGHT = QColor(142, 68, 173)  # purple for per-class highlights
 VE_STR_WIDTH = 16
 STATUS_GAP = 6
 USER_SELECTION_COOLDOWN = 2.0  # seconds to avoid clobbering user selection after interaction
+POS_STICKY_DURATION = 5.0  # seconds to keep the position-change arrow visible
 
 
 class BroadcastList(QWidget):
@@ -87,6 +89,13 @@ class BroadcastList(QWidget):
         self._best_lap_number = {}  # driver_index -> lap_number
         # Timestamp of last explicit user selection (click/double-click)
         self._last_user_action = 0.0
+        # Counter used by the timing updater to trigger periodic list refreshes
+        self._list_update_counter = 0
+        # Track last known overall place per driver to show gained/lost position
+        self._last_places = {}  # driver_index -> last_place
+        # Track recent position change timestamps and direction so arrow can be sticky
+        # maps driver_index -> (timestamp, 'up'|'down')
+        self._pos_change_info = {}
 
         # Label
         self.label_spectating = QLabel("")
@@ -109,20 +118,43 @@ class BroadcastList(QWidget):
             self.listbox_spectate.setGridStyle(Qt.SolidLine)
         except Exception:
             pass
-        # Columns: Name, VE, Status, Top Spd, Best, Avg Laptime, Vehicle Integrity
+        # Columns: Pos, Delta, Name, Vehicle Status, Virtual Energy, Top Spd, Best, Last Laptime, Vehicle Integrity
         headers = [
+            "Pos",
+            "Delta",
             "Name",
-            "Virtual Energy",
             "Vehicle Status",
+            "Virtual Energy",
             "Top Speed",
             "Best Laptime",
             "Last Laptime",
+            "Pos Change",
             "Vehicle Integrity",
         ]
         self.listbox_spectate.setColumnCount(len(headers))
         self.listbox_spectate.setHorizontalHeaderLabels(headers)
         # Auto-scale columns to fill available space
-        self.listbox_spectate.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        header = self.listbox_spectate.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Stretch)
+        # Make the Name column auto-size to its contents and give it a reasonable
+        # minimum width so names aren't cut off when the window is resized.
+        try:
+            # Position column: fixed narrow but wide enough to show arrow
+            header.setSectionResizeMode(0, QHeaderView.Fixed)
+            self.listbox_spectate.setColumnWidth(0, UIScaler.pixel(64))
+            # Delta column: fixed narrow
+            header.setSectionResizeMode(1, QHeaderView.Fixed)
+            self.listbox_spectate.setColumnWidth(1, UIScaler.pixel(64))
+            # Name column: autosize to contents, keep minimum width
+            header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+            min_name_w = UIScaler.pixel(160)
+            self.listbox_spectate.setColumnWidth(2, min_name_w)
+            # keep other columns stretched to use remaining space
+            for col in range(3, self.listbox_spectate.columnCount()):
+                header.setSectionResizeMode(col, QHeaderView.Stretch)
+        except Exception:
+            # Fall back to a global stretch mode if ResizeToContents isn't supported
+            header.setSectionResizeMode(QHeaderView.Stretch)
         # Allow the table to expand to fill available layout space
         self.listbox_spectate.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         # Timer to track live top speeds for all vehicles
@@ -130,8 +162,21 @@ class BroadcastList(QWidget):
         self._speed_timer.timeout.connect(self._update_speeds)
         # default to 200ms polling for speed updates
         self._speed_timer.setInterval(200)
+
+        # Timer to update the vehicle status / timing panel more frequently.
+        # Use 100ms interval so timing-based counters keep expected behaviour
+        # (10 ticks ~= 1s for list auto-refresh).
+        self._timing_timer = QTimer(self)
+        self._timing_timer.timeout.connect(self._update_timing)
+        self._timing_timer.setInterval(100)  # 100 ms -> ~10 Hz updates
         # make table read-only and ensure double-click always triggers spectate
         self.listbox_spectate.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        # Use item selection so only individual cells (name column) can be highlighted
+        try:
+            self.listbox_spectate.setSelectionBehavior(QAbstractItemView.SelectItems)
+            self.listbox_spectate.setSelectionMode(QAbstractItemView.SingleSelection)
+        except Exception:
+            pass
         self.listbox_spectate.cellDoubleClicked.connect(lambda r, c: self._on_row_double_clicked(r, c))
         # track user's clicks so auto-refresh won't override selection immediately after interaction
         try:
@@ -147,6 +192,12 @@ class BroadcastList(QWidget):
             pass
 
         # Button
+        self.button_spectate = QPushButton("Spectate")
+        self.button_spectate.clicked.connect(self.spectate_selected)
+
+        self.button_focus = QPushButton("Focus Camera")
+        self.button_focus.clicked.connect(self.focus_camera)
+
         self.button_refresh = QPushButton("Refresh")
         self.button_refresh.clicked.connect(self.refresh)
 
@@ -161,8 +212,11 @@ class BroadcastList(QWidget):
         self.button_sort.clicked.connect(self._toggle_sort_mode)
 
         layout_button = QHBoxLayout()
+        layout_button.addWidget(self.button_spectate)
+        layout_button.addWidget(self.button_focus)
         layout_button.addWidget(self.button_refresh)
         layout_button.addWidget(self.button_reset)
+        layout_button.addWidget(self.button_sort)
         layout_button.addStretch(1)
         layout_button.addWidget(self.button_toggle)
 
@@ -223,6 +277,11 @@ class BroadcastList(QWidget):
                 self._speed_timer.start()
             except Exception:
                 pass
+            # start timing/vehicle-status updates (more frequent)
+            try:
+                self._timing_timer.start()
+            except Exception:
+                pass
             self.refresh()
         else:
             logger.info("DISABLED: broadcast mode")
@@ -234,6 +293,11 @@ class BroadcastList(QWidget):
             # stop live speed tracking and clear cache
             try:
                 self._speed_timer.stop()
+            except Exception:
+                pass
+            # stop timing updates
+            try:
+                self._timing_timer.stop()
             except Exception:
                 pass
             self._top_speeds.clear()
@@ -273,7 +337,8 @@ class BroadcastList(QWidget):
     def _on_row_double_clicked(self, row: int, column: int):
         """Handle double click anywhere on a row: select driver and focus camera."""
         try:
-            it = self.listbox_spectate.item(row, 0)
+            # Name column is at index 2 (pos=0, delta=1)
+            it = self.listbox_spectate.item(row, 2)
             if it is None:
                 return
             driver_name = it.data(Qt.UserRole) or it.text()
@@ -354,13 +419,21 @@ class BroadcastList(QWidget):
         # For table, find the row with matching UserRole and select it if present
         row_index = None
         for r in range(self.listbox_spectate.rowCount()):
-            it = self.listbox_spectate.item(r, 0)
+            # Name column moved to index 2 (pos=0, delta=1)
+            it = self.listbox_spectate.item(r, 2)
             if it and it.data(Qt.UserRole) == driver_name:
                 row_index = r
                 break
         if row_index is not None:
             try:
-                self.listbox_spectate.selectRow(row_index)
+                # Select only the name cell (column 1) so the entire row isn't highlighted.
+                # This preserves per-column foreground/background colors while making
+                # the selected driver obvious via the name cell only.
+                try:
+                    self.listbox_spectate.setCurrentCell(row_index, 2)
+                except Exception:
+                    # Fallback to selecting the whole row if item-level selection isn't supported
+                    self.listbox_spectate.selectRow(row_index)
             except Exception:
                 pass
         # Make sure selected name valid
@@ -373,7 +446,8 @@ class BroadcastList(QWidget):
             sel = self.listbox_spectate.currentRow()
             if sel is None or sel < 0:
                 return "Anonymous"
-            it = self.listbox_spectate.item(sel, 0)
+            # Name column is index 2 now
+            it = self.listbox_spectate.item(sel, 2)
             if it is None:
                 return "Anonymous"
             return it.data(Qt.UserRole) or it.text() or "Anonymous"
@@ -508,52 +582,280 @@ class BroadcastList(QWidget):
         sorted_classes = sorted(class_groups.keys(), key=lambda c: min(e[0] for e in class_groups[c]))
 
         for cls in sorted_classes:
+            # Precompute per-class highlights: top speed (max), best lap (min), last lap (min)
+            try:
+                indices = [e[3] for e in class_groups[cls]]
+                top_vals = {}
+                best_vals = {}
+                last_vals = {}
+                for idx in indices:
+                    try:
+                        slot = api.read.vehicle.slot_id(idx)
+                    except Exception:
+                        slot = None
+                    top_ms = self._top_speeds.get(slot, self._top_speeds.get(idx, 0.0))
+                    top_vals[idx] = float(top_ms) * 3.6
+                    try:
+                        b = api.read.timing.best_laptime(idx) or 0.0
+                    except Exception:
+                        b = 0.0
+                    best_vals[idx] = float(b) if b and b > 0 else float('inf')
+                    try:
+                        l = api.read.timing.last_laptime(idx) or 0.0
+                    except Exception:
+                        l = 0.0
+                    last_vals[idx] = float(l) if l and l > 0 else float('inf')
+                # Compute starting grid positions within this class (qualification order)
+                class_grid_pos = {}
+                try:
+                    # collect (qual_pos, idx) for drivers with a valid qualification
+                    qual_list = []
+                    for idx in indices:
+                        try:
+                            qp = api.read.vehicle.qualification(idx)
+                        except Exception:
+                            qp = None
+                        if qp is not None and qp > 0:
+                            qual_list.append((int(qp), idx))
+                    # sort by overall qualification grid number and assign class-relative positions
+                    qual_list.sort()
+                    for i, (_qp, didx) in enumerate(qual_list, 1):
+                        class_grid_pos[didx] = i
+                except Exception:
+                    class_grid_pos = {}
+                # determine highlight indices (None if not available)
+                top_idx = max(top_vals, key=top_vals.get) if top_vals else None
+                # only highlight best/last if a finite (positive) value exists
+                best_idx = None
+                last_idx = None
+                if best_vals:
+                    min_best = min(best_vals.values())
+                    if min_best != float('inf'):
+                        best_idx = min(best_vals, key=best_vals.get)
+                if last_vals:
+                    min_last = min(last_vals.values())
+                    if min_last != float('inf'):
+                        last_idx = min(last_vals, key=last_vals.get)
+            except Exception:
+                top_idx = best_idx = last_idx = None
             # Add a header row for the class
             row = table.rowCount()
             table.insertRow(row)
             hdr_item = QTableWidgetItem(f"--- {cls} ---")
             hdr_item.setFlags(Qt.NoItemFlags)
-            hdr_item.setBackground(QColor("#2f2f2f"))
-            hdr_item.setForeground(QColor("#f0f0f0"))
+            # Make class header more prominent: bolder/larger font and clearer contrast
+            try:
+                tbl_font = table.font()
+                hdr_font = QFont(tbl_font)
+                hdr_font.setBold(True)
+                try:
+                    hdr_font.setPointSize(tbl_font.pointSize() + 2)
+                except Exception:
+                    pass
+                hdr_item.setFont(hdr_font)
+            except Exception:
+                pass
+            hdr_item.setBackground(QColor("#2b2b2b"))
+            hdr_item.setForeground(QColor("#ffffff"))
             hdr_item.setTextAlignment(Qt.AlignCenter)
             table.setSpan(row, 0, 1, table.columnCount())
             table.setItem(row, 0, hdr_item)
+            # Increase header row height for improved readability
+            try:
+                table.setRowHeight(row, UIScaler.pixel(28))
+            except Exception:
+                pass
+
+            # Cache ordered indices and time-into for delta calculations
+            try:
+                ordered_indices = [e[3] for e in class_groups[cls]]
+                pos_in_order = {idx: i for i, idx in enumerate(ordered_indices)}
+                time_into = {idx: api.read.timing.estimated_time_into(idx) for idx in ordered_indices}
+            except Exception:
+                ordered_indices = [e[3] for e in class_groups[cls]]
+                pos_in_order = {idx: i for i, idx in enumerate(ordered_indices)}
+                time_into = {}
 
             for place, class_name, name, _index, rel_gap, in_pits, is_yellow, is_blue in class_groups[cls]:
                 row = table.rowCount()
                 table.insertRow(row)
                 class_pos = class_positions.get(_index, place)
+                # default text color for this table (used to reset items)
+                try:
+                    default_clr = table.palette().color(QPalette.Text)
+                    default_font = table.font()
+                    bold_font = QFont(default_font)
+                    try:
+                        bold_font.setBold(True)
+                        bold_font.setPointSize(default_font.pointSize() + 2)
+                    except Exception:
+                        pass
+                except Exception:
+                    default_clr = None
+                    default_font = None
+                    bold_font = None
                 # Safely compute VE display: read fraction and format as percent only
                 try:
                     pct_f = self._read_ve_fraction(_index, allow_global=False)
                 except Exception:
                     pct_f = None
                 if isinstance(pct_f, (int, float)) and pct_f is not None and pct_f > 0.0:
-                    ve_str = f"{int(max(0.0, min(1.0, float(pct_f))) * 100):3d}%"
+                    pct = max(0.0, min(1.0, float(pct_f))) * 100
+                    ve_str = f"{pct:.1f}%"
                 else:
                     ve_str = ""
                 penalty_tag = self._get_penalty_tag(_index)
                 is_lapping = _index in lapping
+                # Determine finished (chequered) state and build status tags
+                try:
+                    finished = api.read.vehicle.finish_state(_index) == 1
+                except Exception:
+                    finished = False
+
+                # Rules:
+                #  - If a car is finished (chequered) and NOT in pits, show only CHEQUERED.
+                #    This overrides other tags.
+                #  - If a car is in pits, show PIT (which also overrides chequered).
+                #  - Otherwise show normal tags (penalty, YELLOW, BLUE, BATTLE, CLOSE).
                 tags = []
-                if penalty_tag:
-                    tags.append(penalty_tag)
                 if in_pits:
+                    # Pit overrides chequered; include penalty count if present
+                    if penalty_tag:
+                        tags.append(penalty_tag)
                     tags.append("PIT")
-                if is_yellow:
-                    tags.append("YEL")
-                if is_blue:
-                    tags.append("BLU")
-                if not is_yellow and not is_blue and not is_lapping and _index in battles:
-                    tags.append("BTL")
+                elif finished:
+                    # Show only chequered flag when finished and not in pits
+                    tags = ["CHEQUERED"]
+                else:
+                    if penalty_tag:
+                        tags.append(penalty_tag)
+                    if is_yellow:
+                        tags.append("YELLOW")
+                    if is_blue:
+                        tags.append("BLUE")
+                if not is_yellow and not is_blue and _index in battles:
+                    tags.append("BATTLE")
+                if not is_yellow and not is_blue and _index in close:
+                    tags.append("CLOSE")
                 status_text = " ".join(tags)
 
+                # Position column (narrow)
+                # Show change indicator: up/down arrow colored green/red when place changes
+                # show class position instead of overall place
+                pos_text = f"{class_pos}"
+                pos_item = QTableWidgetItem(pos_text)
+                pos_item.setTextAlignment(Qt.AlignCenter)
+                pos_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                # Determine arrow indicator based on change from last known place
+                try:
+                    prev = self._last_places.get(_index)
+                    now = monotonic()
+                    # compare and display change for class position
+                    if prev is not None and prev != class_pos:
+                        # gained positions -> lower position number (e.g., 5 -> 4): green up arrow
+                        if class_pos < prev:
+                            direction = 'up'
+                            arrow = "▲"
+                            arrow_color = COLOR_BATTLE
+                        else:
+                            direction = 'down'
+                            arrow = "▼"
+                            arrow_color = COLOR_PENALTY
+                        # append arrow to the pos text and store change timestamp so arrow is sticky
+                        pos_item.setText(f"{class_pos} {arrow}")
+                        pos_item.setForeground(arrow_color)
+                        try:
+                            if bold_font is not None:
+                                pos_item.setFont(bold_font)
+                        except Exception:
+                            pass
+                        self._pos_change_info[_index] = (now, direction)
+                    else:
+                        # If a recent change exists within the sticky window, re-show it
+                        info = self._pos_change_info.get(_index)
+                        if info is not None:
+                            ts, dirc = info
+                            # show arrow for 2.5 seconds
+                            if now - ts <= POS_STICKY_DURATION:
+                                arrow = "▲" if dirc == 'up' else "▼"
+                                arrow_color = COLOR_BATTLE if dirc == 'up' else COLOR_PENALTY
+                                pos_item.setText(f"{class_pos} {arrow}")
+                                pos_item.setForeground(arrow_color)
+                                try:
+                                    if bold_font is not None:
+                                        pos_item.setFont(bold_font)
+                                except Exception:
+                                    pass
+                            else:
+                                # expired
+                                self._pos_change_info.pop(_index, None)
+                                try:
+                                    if default_clr is not None:
+                                        pos_item.setForeground(default_clr)
+                                    if default_font is not None:
+                                        pos_item.setFont(default_font)
+                                except Exception:
+                                    pass
+                        else:
+                            try:
+                                if default_clr is not None:
+                                    pos_item.setForeground(default_clr)
+                                if default_font is not None:
+                                    pos_item.setFont(default_font)
+                            except Exception:
+                                pass
+                    # update stored class place
+                    self._last_places[_index] = class_pos
+                except Exception:
+                    try:
+                        if default_clr is not None:
+                            pos_item.setForeground(default_clr)
+                    except Exception:
+                        pass
+                table.setItem(row, 0, pos_item)
+
+                # Delta column (between Pos and Name): show gap to car ahead in class
+                try:
+                    iord = pos_in_order.get(_index, None)
+                except Exception:
+                    iord = None
+                delta_str = "--"
+                if iord is not None and iord > 0 and laptime_est and laptime_est > 0:
+                    try:
+                        prev_idx = ordered_indices[iord - 1]
+                        diff = time_into.get(prev_idx, 0) - time_into.get(_index, 0)
+                        diff = diff - diff // laptime_est * laptime_est
+                        half_lap = laptime_est * 0.5
+                        if diff > half_lap:
+                            diff -= laptime_est
+                        gap = abs(diff)
+                        # Show delta with one decimal place for compactness (no leading plus)
+                        delta_str = f"{gap:.1f}"
+                    except Exception:
+                        delta_str = "--"
+                delta_item = QTableWidgetItem(delta_str)
+                delta_item.setTextAlignment(Qt.AlignCenter)
+                delta_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                # color delta similar to battle/close highlights
+                try:
+                    if _index in battles:
+                        delta_item.setForeground(COLOR_BATTLE)
+                    elif _index in close:
+                        delta_item.setForeground(COLOR_CLOSE)
+                    else:
+                        if default_clr is not None:
+                            delta_item.setForeground(default_clr)
+                except Exception:
+                    pass
+                table.setItem(row, 1, delta_item)
+
                 # Name column (left-aligned)
-                name_item = QTableWidgetItem(f"P{class_pos:<2d} {name}")
+                name_item = QTableWidgetItem(name)
                 name_item.setData(Qt.UserRole, name)
                 name_item.setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
                 # make cell selectable but not editable
                 name_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-                table.setItem(row, 0, name_item)
+                table.setItem(row, 2, name_item)
 
                 # Car name (next to driver name)
                 # Prefer vehicle name from module info (vehicle dataset) which is the actual car
@@ -577,7 +879,13 @@ class BroadcastList(QWidget):
                 ve_item = QTableWidgetItem(ve_str)
                 ve_item.setTextAlignment(Qt.AlignCenter)
                 ve_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-                table.setItem(row, 1, ve_item)
+                # ensure VE cell uses default text color
+                try:
+                    if default_clr is not None:
+                        ve_item.setForeground(default_clr)
+                except Exception:
+                    pass
+                table.setItem(row, 4, ve_item)
                 # Status - center
                 status_item = QTableWidgetItem(status_text)
                 status_item.setTextAlignment(Qt.AlignCenter)
@@ -594,18 +902,14 @@ class BroadcastList(QWidget):
                         clr = COLOR_BLUE
                     elif in_pits:
                         clr = COLOR_PIT
-                    elif not is_lapping and _index in battles:
+                    elif _index in battles:
                         clr = COLOR_BATTLE
-                    elif not is_lapping and _index in close:
+                    elif _index in close:
                         clr = COLOR_CLOSE
-                    if clr is not None:
-                        # apply matching text color to driver name and status cell
-                        name_item.setForeground(clr)
-                        status_item.setForeground(clr)
                 except Exception:
-                    pass
+                    clr = None
 
-                table.setItem(row, 2, status_item)
+                table.setItem(row, 3, status_item)
 
                 # Top speed (from cache) - center
                 # Try to read top speed by stable slot id if available, fallback to index
@@ -613,11 +917,20 @@ class BroadcastList(QWidget):
                     slot = api.read.vehicle.slot_id(_index)
                 except Exception:
                     slot = None
-                top_speed_kph = int(self._top_speeds.get(slot, self._top_speeds.get(_index, 0.0)) * 3.6)
-                top_item = QTableWidgetItem(f"{top_speed_kph} km/h")
+                top_speed_kph = self._top_speeds.get(slot, self._top_speeds.get(_index, 0.0)) * 3.6
+                top_item = QTableWidgetItem(f"{top_speed_kph:.1f} km/h")
                 top_item.setTextAlignment(Qt.AlignCenter)
                 top_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-                table.setItem(row, 3, top_item)
+                table.setItem(row, 5, top_item)
+                # Highlight highest top speed per class in purple
+                try:
+                    if top_idx is not None and _index == top_idx:
+                        top_item.setForeground(COLOR_HIGHLIGHT)
+                    else:
+                        if default_clr is not None:
+                            top_item.setForeground(default_clr)
+                except Exception:
+                    pass
 
                 # Best lap - center
                 try:
@@ -652,7 +965,21 @@ class BroadcastList(QWidget):
                 best_item = QTableWidgetItem(best_display)
                 best_item.setTextAlignment(Qt.AlignCenter)
                 best_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-                table.setItem(row, 4, best_item)
+                try:
+                    if default_clr is not None:
+                        best_item.setForeground(default_clr)
+                except Exception:
+                    pass
+                table.setItem(row, 6, best_item)
+                # Highlight best lap per class in purple
+                try:
+                    if best_idx is not None and _index == best_idx:
+                        best_item.setForeground(COLOR_HIGHLIGHT)
+                    else:
+                        if default_clr is not None:
+                            best_item.setForeground(default_clr)
+                except Exception:
+                    pass
 
                 # Last lap time for this driver
                 try:
@@ -663,7 +990,59 @@ class BroadcastList(QWidget):
                 last_item = QTableWidgetItem(last_display)
                 last_item.setTextAlignment(Qt.AlignCenter)
                 last_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-                table.setItem(row, 5, last_item)
+                try:
+                    if default_clr is not None:
+                        last_item.setForeground(default_clr)
+                except Exception:
+                    pass
+                table.setItem(row, 7, last_item)
+                # Highlight most recent (last) lap per class in purple
+                try:
+                    if last_idx is not None and _index == last_idx:
+                        last_item.setForeground(COLOR_HIGHLIGHT)
+                    else:
+                        if default_clr is not None:
+                            last_item.setForeground(default_clr)
+                except Exception:
+                    pass
+
+                # Pos Change column - show change vs starting grid (qualification) using arrows
+                try:
+                    # Only compute class-relative grid position change.
+                    curr_pos = api.read.vehicle.place(_index)
+                    pos_change_item = QTableWidgetItem("--")
+                    pos_change_item.setTextAlignment(Qt.AlignCenter)
+                    pos_change_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                    # class_grid_pos was computed per-class above; use it if available
+                    gpos = class_grid_pos.get(_index)
+                    if gpos is not None and curr_pos and curr_pos > 0:
+                        # compute class position (class_pos) vs grid class position (gpos)
+                        change = gpos - class_pos
+                        if change > 0:
+                            pos_change_item.setText(f"▲ {change}")
+                            pos_change_item.setForeground(COLOR_BATTLE)
+                        elif change < 0:
+                            pos_change_item.setText(f"▼ {abs(change)}")
+                            pos_change_item.setForeground(COLOR_PENALTY)
+                        else:
+                            pos_change_item.setText("-")
+                            if default_clr is not None:
+                                pos_change_item.setForeground(default_clr)
+                    else:
+                        # unknown starting/grid position within class
+                        pos_change_item.setText("--")
+                        if default_clr is not None:
+                            pos_change_item.setForeground(default_clr)
+                except Exception:
+                    pos_change_item = QTableWidgetItem("--")
+                    pos_change_item.setTextAlignment(Qt.AlignCenter)
+                    pos_change_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                    try:
+                        if default_clr is not None:
+                            pos_change_item.setForeground(default_clr)
+                    except Exception:
+                        pass
+                table.setItem(row, 8, pos_change_item)
 
                 # Vehicle integrity column (percentage) - center
                 try:
@@ -674,9 +1053,50 @@ class BroadcastList(QWidget):
                 integrity_item = QTableWidgetItem(f"{integrity_pct}%")
                 integrity_item.setTextAlignment(Qt.AlignCenter)
                 integrity_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-                table.setItem(row, 6, integrity_item)
+                try:
+                    # Color integrity per thresholds:
+                    # 100% -> green, below 100% -> yellow,
+                    # 100% -> green
+                    # below 50% -> red
+                    # below 87% -> orange
+                    # otherwise yellow
+                    if integrity_pct == 100:
+                        clr_int = COLOR_BATTLE
+                    elif integrity_pct < 50:
+                        clr_int = COLOR_PENALTY
+                    elif integrity_pct < 87:
+                        # show orange when strictly below 87%
+                        clr_int = COLOR_CLOSE
+                    elif integrity_pct < 100:
+                        clr_int = COLOR_YELLOW
+                    else:
+                        clr_int = None
+                    if clr_int is not None:
+                        integrity_item.setForeground(clr_int)
+                    else:
+                        if default_clr is not None:
+                            integrity_item.setForeground(default_clr)
+                except Exception:
+                    try:
+                        if default_clr is not None:
+                            integrity_item.setForeground(default_clr)
+                    except Exception:
+                        pass
+                table.setItem(row, 9, integrity_item)
 
                 # no additional coloring here; text color already applied to name and status
+                # Apply name/status color at end once all columns set so later
+                # per-column highlights don't accidentally overwrite it.
+                try:
+                    if clr is not None:
+                        name_item.setForeground(clr)
+                        status_item.setForeground(clr)
+                    else:
+                        if default_clr is not None:
+                            name_item.setForeground(default_clr)
+                            status_item.setForeground(default_clr)
+                except Exception:
+                    pass
 
         # ensure table repaints so background changes take effect
         try:
@@ -1064,9 +1484,9 @@ class BroadcastList(QWidget):
         if not cfg.api["enable_player_index_override"]:
             return
 
-        # Auto-refresh driver list (~every 1s)
+        # Auto-refresh driver list (~every 0.5s)
         self._list_update_counter += 1
-        if self._list_update_counter >= 10:
+        if self._list_update_counter >= 5:
             self._list_update_counter = 0
             self._refresh_list_only()
 
@@ -1155,8 +1575,8 @@ class BroadcastList(QWidget):
             if index not in self._top_speeds or speed_ms > self._top_speeds[index]:
                 self._top_speeds[index] = speed_ms
             top_speed_kph = self._top_speeds[index] * 3.6
-            self.label_speed.setText(f"<b>{speed_kph:.0f} km/h</b>")
-            self.label_top_speed.setText(f"<b>{top_speed_kph:.0f} km/h</b>")
+            self.label_speed.setText(f"<b>{speed_kph:.1f} km/h</b>")
+            self.label_top_speed.setText(f"<b>{top_speed_kph:.1f} km/h</b>")
 
             # Penalty
             penalty_reason = self._get_penalty_reason(index)

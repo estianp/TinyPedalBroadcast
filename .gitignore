@@ -8,6 +8,10 @@
 /settings/
 /trackmap/
 
+# build and run output
+/build/
+/run/
+
 __pycache__/
 
 # pipenv stuff
