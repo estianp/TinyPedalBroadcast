@@ -1,38 +1,90 @@
-# TinyPedal Broadcast — Features (Updated)
-
-This repository contains the broadcast/spectator UI with the following updated features implemented on top of the base reader API.
+# TinyPedal Broadcast — Full Feature List
 
 Screenshot: ![sample](images/sample.png)
 
-## Key updated features
+This README summarizes all broadcast / spectator features implemented in this build.
 
-- **Chequered flag vehicle status**
-  - Vehicles that have finished the race are shown with a `CHEQUERED` status tag.
-  - `CHEQUERED` overrides all other status tags for that vehicle unless the vehicle is in the pits.
-  - If a vehicle is in the pits it shows `PIT`, which takes precedence over `CHEQUERED`.
+Important: to run the app download the latest published release and run the provided executable (no build steps required).
 
-- **Pos Change column (class-relative)**
-  - New `Pos Change` column (placed between `Last Laptime` and `Vehicle Integrity`) shows how many positions a driver has gained or lost relative to their class starting grid position.
-  - Displays a green up arrow `? N` for positions gained, red down arrow `? N` for positions lost, `-` when unchanged, and `--` when grid information is not available.
-  - There is a small gap between the arrow and the count for readability (eg. `? 3`).
-  - Calculation is class-relative — starting grid positions are inferred per-class from `api.read.vehicle.qualification()` and converted to a class grid rank.
+## Overview
 
-- **Vehicle Integrity colouring**
-  - Vehicle integrity percentage is coloured according to new thresholds:
-    - 100% — green
-    - below 50% — red
-    - below 87% (strictly) — orange
-    - otherwise — yellow
+The broadcast UI provides a compact, high-frequency spectator view of all vehicles in the session with per-class grouping, live timing, and vehicle status indicators.
 
-## Where to look in the code
+## Core broadcast features
 
-- Primary UI and logic for these features are in `tinypedal/ui/broadcast_view.py`.
-- Sample image: `images/sample.png` (included in this repo).
+- Spectator controls
+  - Enable/disable broadcast (player index override) toggle
+  - Select a driver to spectate by clicking or double-clicking the name
+  - `Spectate`, `Focus Camera`, `Refresh`, and `Reset` buttons
+  - Focus camera will call the reader API to follow the spectated vehicle
 
-## Quick start
+- Live update timers
+  - Timing updates run at ~10Hz (100 ms) for time-sensitive counters
+  - Top-speed polling runs at ~200 ms to compute live max top speeds per vehicle
+  - Periodic auto-refresh of the driver list (~0.5 s) to keep the UI responsive
 
-1. Ensure the environment and reader API are available for the connected simulator.
-2. Run the application entry point (example): `python run.py`.
-3. Enable broadcast/spectator mode in the UI to see the updated driver list and the new columns.
+## Driver list columns
 
-If you need the README to include installation steps, examples of configuration values, or a different image, tell me what to add.
+- `Pos` — class position (with sticky up/down arrow on recent position changes)
+  - Arrow indicates a recent class position change; arrow remains visible for a short sticky duration
+- `Delta` — gap to the car ahead in class, showing a compact one-decimal value when timing available
+- `Name` — driver name (selectable)
+- `Vehicle Status` — combined status tags (penalties, PIT, CHEQUERED, YELLOW, BLUE, BATTLE, CLOSE)
+  - `PIT` overrides `CHEQUERED`
+  - `CHEQUERED` overrides other non-pit tags
+  - Penalty tag (e.g., `SG(1)`, `DT(2)`, `PEN(3)`) is shown when penalties exist
+- `Virtual Energy` — simple percentage per-driver (VE fraction interpreted from multiple available readers)
+- `Top Speed` — live top speed (kph) tracked per stable vehicle slot id
+  - The UI highlights the highest top speed in each class
+- `Best Laptime` — best lap formatted for display, includes lap number when detected
+  - Best-per-class is highlighted
+- `Last Laptime` — most recent completed lap, formatted; most recent-per-class is highlighted
+- `Pos Change` — class-relative change vs class starting grid
+  - Shows `? N` (green) for gains, `? N` (red) for losses, `-` for no change, `--` when grid info unavailable
+  - Gap between arrow and count for readability (e.g., `? 3`)
+  - Starting grid per-class is inferred from `qualification` values and converted to a class-rank
+- `Vehicle Integrity` — percent with color-coded thresholds
+  - 100%: green
+  - below 50%: red
+  - below 87% (strict): orange
+  - otherwise: yellow
+
+## Per-class highlights and analysis
+
+- Class grouping and headers are shown (each class lists its drivers)
+- Highlights per class:
+  - Highest top speed highlighted
+  - Best lap highlighted
+  - Most recent (last) lap highlighted
+- Battles and close-proximity detection
+  - On-track drivers are analyzed by estimated time-into-lap to find pairs within proximity thresholds
+  - `BATTLE` (tight proximity) and `CLOSE` (nearby) tags are applied and used for coloring
+- Lapping detection
+  - Non-blue drivers near a blue-flagged car are marked as lapping
+
+## Sticky states and heuristics
+
+- Yellow state detection uses vehicle speed thresholds with a short sticky duration so a slow driver remains marked briefly after recovering
+- Position-change arrows are sticky for a configurable short duration so recent gains/losses remain visible
+- Top speeds are stored per vehicle slot id (stable across order/class changes)
+
+## Virtual energy (VE) handling
+
+- Uses a centralized reader helper to support legacy module data (fraction 0..1), absolute (`ve`/`max_e`) or percentage (0..100) readers
+- The driver list shows only a compact percentage string while the spectated driver page uses a progress bar
+
+## Penalties & reasons
+
+- Penalty tags show counts and infer common penalty types using available scoring flags when possible
+- A separate penalty reason label is available on the spectated-driver panel
+
+## Resets and caching
+
+- `Reset` clears cached top speeds, yellow timestamps, and other transient mappings and forces a refresh
+
+## Notes and caveats
+
+- Many behaviors rely on the reader API and available LMU/module data — values may be missing or unavailable depending on the data source and simulator state
+- Class-relative starting grid inference uses `api.read.vehicle.qualification()` when present; if qualification values are missing the `Pos Change` column will show `--`
+
+If you want these features described differently or want installation steps for building from source instead of running the release executable, tell me what to add or change.
