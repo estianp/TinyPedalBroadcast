@@ -1,4 +1,4 @@
-# TinyPedal Broadcast — Full Feature List
+# TinyPedal Broadcast â€” Full Feature List
 
 Screenshot: ![sample](images/sample.png)
 
@@ -25,25 +25,25 @@ The broadcast UI provides a compact, high-frequency spectator view of all vehicl
 
 ## Driver list columns
 
-- `Pos` — class position (with sticky up/down arrow on recent position changes)
+- `Pos` â€” class position (with sticky up/down arrow on recent position changes)
   - Arrow indicates a recent class position change; arrow remains visible for a short sticky duration
-- `Delta` — gap to the car ahead in class, showing a compact one-decimal value when timing available
-- `Name` — driver name (selectable)
-- `Vehicle Status` — combined status tags (penalties, PIT, CHEQUERED, YELLOW, BLUE, BATTLE, CLOSE)
+- `Delta` â€” gap to the car ahead in class, showing a compact one-decimal value when timing available
+- `Name` â€” driver name (selectable)
+- `Vehicle Status` â€” combined status tags (penalties, PIT, CHEQUERED, YELLOW, BLUE, BATTLE, CLOSE)
   - `PIT` overrides `CHEQUERED`
   - `CHEQUERED` overrides other non-pit tags
-  - Penalty tag (e.g., `SG(1)`, `DT(2)`, `PEN(3)`) is shown when penalties exist
-- `Virtual Energy` — simple percentage per-driver (VE fraction interpreted from multiple available readers)
-- `Top Speed` — live top speed (kph) tracked per stable vehicle slot id
+  - Penalty tag (PEN (1)) is shown when a penalty exists
+- `Virtual Energy` â€” simple percentage per-driver (VE fraction interpreted from multiple available readers)
+- `Top Speed` â€” live top speed (kph) tracked per stable vehicle slot id
   - The UI highlights the highest top speed in each class
-- `Best Laptime` — best lap formatted for display, includes lap number when detected
+- `Best Laptime` â€” best lap formatted for display, includes lap number when detected
   - Best-per-class is highlighted
-- `Last Laptime` — most recent completed lap, formatted; most recent-per-class is highlighted
-- `Pos Change` — class-relative change vs class starting grid
+- `Last Laptime` â€” most recent completed lap, formatted; most recent-per-class is highlighted
+- `Pos Change` â€” class-relative change vs class starting grid
   - Shows `? N` (green) for gains, `? N` (red) for losses, `-` for no change, `--` when grid info unavailable
   - Gap between arrow and count for readability (e.g., `? 3`)
   - Starting grid per-class is inferred from `qualification` values and converted to a class-rank
-- `Vehicle Integrity` — percent with color-coded thresholds
+- `Vehicle Integrity` â€” percent with color-coded thresholds
   - 100%: green
   - below 50%: red
   - below 87% (strict): orange
@@ -71,12 +71,7 @@ The broadcast UI provides a compact, high-frequency spectator view of all vehicl
 ## Virtual energy (VE) handling
 
 - Uses a centralized reader helper to support legacy module data (fraction 0..1), absolute (`ve`/`max_e`) or percentage (0..100) readers
-- The driver list shows only a compact percentage string while the spectated driver page uses a progress bar
-
-## Penalties & reasons
-
-- Penalty tags show counts and infer common penalty types using available scoring flags when possible
-- A separate penalty reason label is available on the spectated-driver panel
+- The driver list shows only a compact percentage string
 
 ## Resets and caching
 
@@ -84,7 +79,5 @@ The broadcast UI provides a compact, high-frequency spectator view of all vehicl
 
 ## Notes and caveats
 
-- Many behaviors rely on the reader API and available LMU/module data — values may be missing or unavailable depending on the data source and simulator state
+- Many behaviors rely on the reader API and available LMU/module data â€” values may be missing or unavailable depending on the data source and simulator state
 - Class-relative starting grid inference uses `api.read.vehicle.qualification()` when present; if qualification values are missing the `Pos Change` column will show `--`
-
-If you want these features described differently or want installation steps for building from source instead of running the release executable, tell me what to add or change.
